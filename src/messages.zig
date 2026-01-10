@@ -86,6 +86,11 @@ pub const AssistantMessage = struct {
     content: []ContentBlock,
     model: ?[]const u8 = null,
     is_error: bool = false,
+
+    /// Free the content slice.
+    pub fn deinit(self: AssistantMessage, allocator: Allocator) void {
+        allocator.free(self.content);
+    }
 };
 
 /// System message (e.g., init, error, etc.).
@@ -182,6 +187,14 @@ pub const Message = union(enum) {
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
         });
+    }
+
+    /// Free any allocations owned by this message.
+    pub fn deinit(self: Message, allocator: Allocator) void {
+        switch (self) {
+            .assistant => |m| m.deinit(allocator),
+            else => {},
+        }
     }
 
     /// Convert parsed JSON value to a Message.

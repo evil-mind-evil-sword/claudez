@@ -13,10 +13,17 @@ pub const QueryIterator = struct {
     transport: *Transport,
     allocator: Allocator,
     current_parsed: ?std.json.Parsed(std.json.Value) = null,
+    current_message: ?Message = null,
     done: bool = false,
 
     pub fn next(self: *QueryIterator) !?Message {
         if (self.done) return null;
+
+        // Free previous message allocations
+        if (self.current_message) |msg| {
+            msg.deinit(self.allocator);
+            self.current_message = null;
+        }
 
         // Free previous parsed value
         if (self.current_parsed) |*p| {
@@ -45,6 +52,9 @@ pub const QueryIterator = struct {
             return ClaudeError.MalformedMessage;
         };
 
+        // Store for cleanup on next iteration
+        self.current_message = msg;
+
         // Check if this is the final message
         if (msg == .result) {
             self.done = true;
@@ -54,6 +64,9 @@ pub const QueryIterator = struct {
     }
 
     pub fn deinit(self: *QueryIterator) void {
+        if (self.current_message) |msg| {
+            msg.deinit(self.allocator);
+        }
         if (self.current_parsed) |*p| {
             p.deinit();
         }
