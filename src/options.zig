@@ -164,23 +164,25 @@ pub const Options = struct {
 
         // Tools
         if (self.tools) |tools| {
-            try args.append(allocator,"--tools");
+            try args.append(allocator, "--tools");
             if (tools.len == 0) {
-                try args.append(allocator,"");
+                try args.append(allocator, "");
             } else {
-                // Join with commas - caller must ensure this is allocated
-                try args.append(allocator,tools[0]); // Simplified for now
+                const joined = try std.mem.join(allocator, ",", tools);
+                try args.append(allocator, joined);
             }
         }
 
         if (self.allowed_tools) |tools| {
-            try args.append(allocator,"--allowedTools");
-            try args.append(allocator,tools[0]); // Simplified
+            try args.append(allocator, "--allowedTools");
+            const joined = try std.mem.join(allocator, ",", tools);
+            try args.append(allocator, joined);
         }
 
         if (self.disallowed_tools) |tools| {
-            try args.append(allocator,"--disallowedTools");
-            try args.append(allocator,tools[0]); // Simplified
+            try args.append(allocator, "--disallowedTools");
+            const joined = try std.mem.join(allocator, ",", tools);
+            try args.append(allocator, joined);
         }
 
         // Model
@@ -196,17 +198,15 @@ pub const Options = struct {
 
         // Limits
         if (self.max_turns) |turns| {
-            try args.append(allocator,"--max-turns");
-            var buf: [16]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{turns}) catch "1";
-            try args.append(allocator,slice);
+            try args.append(allocator, "--max-turns");
+            const turns_str = try std.fmt.allocPrint(allocator, "{d}", .{turns});
+            try args.append(allocator, turns_str);
         }
 
         if (self.max_budget_usd) |budget| {
-            try args.append(allocator,"--max-budget-usd");
-            var buf: [32]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d:.2}", .{budget}) catch "1.00";
-            try args.append(allocator,slice);
+            try args.append(allocator, "--max-budget-usd");
+            const budget_str = try std.fmt.allocPrint(allocator, "{d:.2}", .{budget});
+            try args.append(allocator, budget_str);
         }
 
         // Permission mode
@@ -227,15 +227,15 @@ pub const Options = struct {
 
         // Advanced options
         if (self.betas) |betas| {
-            try args.append(allocator,"--betas");
-            try args.append(allocator,betas[0]); // Simplified
+            try args.append(allocator, "--betas");
+            const joined = try std.mem.join(allocator, ",", betas);
+            try args.append(allocator, joined);
         }
 
         if (self.max_thinking_tokens) |tokens| {
-            try args.append(allocator,"--max-thinking-tokens");
-            var buf: [16]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{tokens}) catch "1024";
-            try args.append(allocator,slice);
+            try args.append(allocator, "--max-thinking-tokens");
+            const tokens_str = try std.fmt.allocPrint(allocator, "{d}", .{tokens});
+            try args.append(allocator, tokens_str);
         }
 
         if (self.json_schema) |schema| {
@@ -271,14 +271,18 @@ pub const Options = struct {
 };
 
 test "options builds query command" {
-    const allocator = std.testing.allocator;
+    // Use arena allocator since buildQueryCommand allocates strings internally
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     const opts = Options{
         .model = "claude-sonnet-4-5",
         .max_turns = 5,
     };
 
     const args = try opts.buildQueryCommand(allocator, "Hello");
-    defer allocator.free(args);
+    // No need to free - arena handles cleanup
 
     try std.testing.expect(args.len > 0);
     try std.testing.expectEqualStrings("claude", args[0]);
