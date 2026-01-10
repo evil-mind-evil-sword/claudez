@@ -8,8 +8,6 @@ claudez wraps the Claude Code CLI to provide programmatic access from Zig. The S
 
 - **One-shot queries** — Send a prompt, iterate over responses
 - **Streaming client** — Multi-turn conversations with session continuity
-- **Hooks** — Intercept tool calls before/after execution
-- **MCP tools** — Define custom tools Claude can invoke
 
 ## Requirements
 
@@ -24,6 +22,8 @@ Add to `build.zig.zon`:
 .dependencies = .{
     .claudez = .{
         .url = "https://github.com/evil-mind-evil-sword/claudez/archive/main.tar.gz",
+        // Run `zig fetch <url>` to get the hash, then add:
+        // .hash = "...",
     },
 },
 ```
@@ -207,36 +207,6 @@ const ContentBlock = union(enum) {
 };
 ```
 
-### Hooks
-
-Intercept Claude's operations:
-
-```zig
-var hooks = claudez.HookConfig.init(allocator);
-defer hooks.deinit();
-
-hooks.addHook(.pre_tool_use, .{
-    .matcher = "Write",  // Match tool name
-    .callback = myCallback,
-}) catch {};
-```
-
-### MCP Tools
-
-Define custom tools:
-
-```zig
-const my_tool = claudez.Tool{
-    .name = "get_weather",
-    .description = "Get current weather for a location",
-    .input_schema = schema,
-    .handler = weatherHandler,
-};
-
-var server = try claudez.createSdkMcpServer(allocator, "my-server", "1.0", &.{my_tool});
-defer server.deinit();
-```
-
 ## Examples
 
 Build and run the included examples:
@@ -246,6 +216,13 @@ zig build
 ./zig-out/bin/simple_query
 ./zig-out/bin/streaming
 ```
+
+## Planned Features
+
+The following types are exported but not yet integrated into the Client/Query interfaces:
+
+- **Hooks** — `HookConfig`, `HookEvent` for intercepting tool operations
+- **MCP Tools** — `McpServer`, `Tool` for custom in-process tools
 
 ## License
 
