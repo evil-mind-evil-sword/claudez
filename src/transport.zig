@@ -145,14 +145,11 @@ pub const Transport = struct {
 
         // Create arena for all command-related allocations
         self.cmd_arena = std.heap.ArenaAllocator.init(self.allocator);
-        errdefer {
-            self.cmd_arena.?.deinit();
-            self.cmd_arena = null;
-        }
+        // Use freeProcessArgs on error to clean both arena AND current_argv
+        errdefer self.freeProcessArgs();
         const arena_alloc = self.cmd_arena.?.allocator();
 
         const args = try self.options.buildQueryCommand(arena_alloc, prompt);
-        // No errdefer needed - arena handles cleanup
 
         // Replace "claude" with actual cli path
         const argv = try arena_alloc.alloc([]const u8, args.len);
@@ -177,14 +174,11 @@ pub const Transport = struct {
 
         // Create arena for all command-related allocations
         self.cmd_arena = std.heap.ArenaAllocator.init(self.allocator);
-        errdefer {
-            self.cmd_arena.?.deinit();
-            self.cmd_arena = null;
-        }
+        // Use freeProcessArgs on error to clean both arena AND current_argv
+        errdefer self.freeProcessArgs();
         const arena_alloc = self.cmd_arena.?.allocator();
 
         const args = try self.options.buildStreamingCommand(arena_alloc);
-        // No errdefer needed - arena handles cleanup
 
         const argv = try arena_alloc.alloc([]const u8, args.len);
         argv[0] = self.cli_path;
