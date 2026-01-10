@@ -152,12 +152,13 @@ pub const McpServer = struct {
 
     /// Get list of tool names.
     pub fn listTools(self: *McpServer, allocator: Allocator) ![]const []const u8 {
-        var list = std.ArrayList([]const u8).init(allocator);
+        // In Zig 0.15, ArrayList is unmanaged
+        var list: std.ArrayList([]const u8) = .empty;
         var iter = self.tools.iterator();
         while (iter.next()) |entry| {
-            try list.append(entry.key_ptr.*);
+            try list.append(allocator, entry.key_ptr.*);
         }
-        return list.toOwnedSlice();
+        return list.toOwnedSlice(allocator);
     }
 
     /// Generate MCP tool list JSON.

@@ -7,6 +7,7 @@ const Options = @import("options.zig").Options;
 const PermissionMode = @import("options.zig").PermissionMode;
 const messages = @import("messages.zig");
 const Message = messages.Message;
+const ContentBlock = messages.ContentBlock;
 const ClaudeError = @import("errors.zig").ClaudeError;
 
 /// Control request types.
@@ -28,6 +29,29 @@ pub const ControlCallback = *const fn (response: std.json.Value, context: ?*anyo
 const PendingRequest = struct {
     callback: ?ControlCallback,
     context: ?*anyopaque,
+};
+
+/// Response from receiveResponse() - owns messages and their backing JSON data.
+/// Call deinit() when done to free all resources.
+pub const Response = struct {
+    messages: []Message,
+    allocator: Allocator,
+    // Internal: parsed JSON values that back the messages
+    parsed_values: []std.json.Parsed(std.json.Value),
+    // Internal: allocated content blocks
+    content_blocks: [][]ContentBlock,
+
+    pub fn deinit(self: *Response) void {
+        for (self.content_blocks) |blocks| {
+            self.allocator.free(blocks);
+        }
+        self.allocator.free(self.content_blocks);
+        for (self.parsed_values) |*p| {
+            p.deinit();
+        }
+        self.allocator.free(self.parsed_values);
+        self.allocator.free(self.messages);
+    }
 };
 
 /// Streaming client for interactive conversations.
@@ -135,16 +159,72 @@ pub const Client = struct {
     }
 
     /// Receive messages until a ResultMessage.
-    pub fn receiveResponse(self: *Client) ![]Message {
-        var result: std.ArrayList(Message) = .empty;
-        errdefer result.deinit(self.allocator);
-
-        while (try self.receiveMessage()) |msg| {
-            try result.append(self.allocator, msg);
-            if (msg == .result) break;
+    /// Returns a Response that owns all messages and their backing data.
+    /// Caller must call response.deinit() when done.
+    pub fn receiveResponse(self: *Client) !Response {
+        var msg_list: std.ArrayList(Message) = .empty;
+        errdefer msg_list.deinit(self.allocator);
+        var parsed_list: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty;
+        errdefer {
+            for (parsed_list.items) |*p| p.deinit();
+            parsed_list.deinit(self.allocator);
+        }
+        var content_list: std.ArrayList([]ContentBlock) = .empty;
+        errdefer {
+            for (content_list.items) |blocks| self.allocator.free(blocks);
+            content_list.deinit(self.allocator);
         }
 
-        return result.toOwnedSlice(self.allocator);
+        while (true) {
+            const json_bytes = self.transport.readMessage() orelse break;
+            defer self.allocator.free(json_bytes);
+
+            if (json_bytes.len == 0) continue;
+
+            var parsed = Message.parse(self.allocator, json_bytes) catch {
+                return ClaudeError.JsonParseError;
+            };
+            // Don't defer deinit - we're keeping it alive
+
+            const value = parsed.value;
+
+            // Check for control messages
+            if (value.object.get("type")) |t| {
+                if (std.mem.eql(u8, t.string, "control_response")) {
+                    try self.handleControlResponse(value);
+                    parsed.deinit(); // Control messages not kept
+                    continue;
+                } else if (std.mem.eql(u8, t.string, "control_request")) {
+                    try self.handleControlRequest(value);
+                    parsed.deinit();
+                    continue;
+                }
+            }
+
+            const msg = Message.fromJson(self.allocator, value) catch {
+                parsed.deinit();
+                return ClaudeError.MalformedMessage;
+            };
+
+            // Track the parsed value to keep strings alive
+            try parsed_list.append(self.allocator, parsed);
+
+            // Track content blocks if this is an assistant message
+            if (msg == .assistant) {
+                try content_list.append(self.allocator, msg.assistant.content);
+            }
+
+            const is_result = msg == .result;
+            try msg_list.append(self.allocator, msg);
+            if (is_result) break;
+        }
+
+        return .{
+            .messages = try msg_list.toOwnedSlice(self.allocator),
+            .allocator = self.allocator,
+            .parsed_values = try parsed_list.toOwnedSlice(self.allocator),
+            .content_blocks = try content_list.toOwnedSlice(self.allocator),
+        };
     }
 
     /// Send interrupt signal.

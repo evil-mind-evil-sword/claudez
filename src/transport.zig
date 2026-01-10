@@ -100,6 +100,10 @@ pub const Transport = struct {
     connected: bool = false,
     cli_path: []const u8,
     options: Options,
+    // Store argv and args to keep them alive for the process lifetime
+    // (std.process.Child stores argv by reference)
+    current_argv: ?[]const []const u8 = null,
+    current_args: ?[]const []const u8 = null,
 
     pub fn init(allocator: Allocator, opts: Options) !Transport {
         const cli = try findCli(allocator, opts.cli_path);
@@ -119,22 +123,42 @@ pub const Transport = struct {
         if (self.options.cli_path == null) {
             self.allocator.free(self.cli_path);
         }
+        self.freeProcessArgs();
+    }
+
+    fn freeProcessArgs(self: *Transport) void {
+        if (self.current_argv) |argv| {
+            self.allocator.free(argv);
+            self.current_argv = null;
+        }
+        if (self.current_args) |args| {
+            self.allocator.free(args);
+            self.current_args = null;
+        }
     }
 
     /// Connect with a one-shot query.
     pub fn connectQuery(self: *Transport, prompt: []const u8) !void {
         if (self.connected) return ClaudeError.AlreadyConnected;
 
+        // Free any previous args (shouldn't happen, but defensive)
+        self.freeProcessArgs();
+
         const args = try self.options.buildQueryCommand(self.allocator, prompt);
-        defer self.allocator.free(args);
+        errdefer self.allocator.free(args);
 
         // Replace "claude" with actual cli path
-        var argv = try self.allocator.alloc([]const u8, args.len);
-        defer self.allocator.free(argv);
+        const argv = try self.allocator.alloc([]const u8, args.len);
+        errdefer self.allocator.free(argv);
         argv[0] = self.cli_path;
         for (args[1..], 1..) |arg, i| {
             argv[i] = arg;
         }
+
+        // Store args and argv - they must stay alive while Child process exists
+        // (std.process.Child stores argv by reference)
+        self.current_args = args;
+        self.current_argv = argv;
 
         try self.spawnProcess(argv);
     }
@@ -143,15 +167,22 @@ pub const Transport = struct {
     pub fn connectStreaming(self: *Transport) !void {
         if (self.connected) return ClaudeError.AlreadyConnected;
 
-        const args = try self.options.buildStreamingCommand(self.allocator);
-        defer self.allocator.free(args);
+        // Free any previous args (shouldn't happen, but defensive)
+        self.freeProcessArgs();
 
-        var argv = try self.allocator.alloc([]const u8, args.len);
-        defer self.allocator.free(argv);
+        const args = try self.options.buildStreamingCommand(self.allocator);
+        errdefer self.allocator.free(args);
+
+        const argv = try self.allocator.alloc([]const u8, args.len);
+        errdefer self.allocator.free(argv);
         argv[0] = self.cli_path;
         for (args[1..], 1..) |arg, i| {
             argv[i] = arg;
         }
+
+        // Store args and argv - they must stay alive while Child process exists
+        self.current_args = args;
+        self.current_argv = argv;
 
         try self.spawnProcess(argv);
     }

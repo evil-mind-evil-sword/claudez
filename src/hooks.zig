@@ -217,10 +217,8 @@ pub const HookConfig = struct {
     matchers: std.EnumArray(HookEvent, std.ArrayList(HookMatcher)),
 
     pub fn init(allocator: Allocator) HookConfig {
-        var matchers = std.EnumArray(HookEvent, std.ArrayList(HookMatcher)).initUndefined();
-        inline for (std.meta.fields(HookEvent)) |field| {
-            matchers.set(@enumFromInt(field.value), std.ArrayList(HookMatcher).init(allocator));
-        }
+        // In Zig 0.15, ArrayList is unmanaged - use default initialization
+        const matchers = std.EnumArray(HookEvent, std.ArrayList(HookMatcher)).initFill(.empty);
         return .{
             .allocator = allocator,
             .matchers = matchers,
@@ -229,12 +227,12 @@ pub const HookConfig = struct {
 
     pub fn deinit(self: *HookConfig) void {
         inline for (std.meta.fields(HookEvent)) |field| {
-            self.matchers.getPtr(@enumFromInt(field.value)).deinit();
+            self.matchers.getPtr(@enumFromInt(field.value)).deinit(self.allocator);
         }
     }
 
     pub fn addHook(self: *HookConfig, event: HookEvent, matcher: HookMatcher) !void {
-        try self.matchers.getPtr(event).append(matcher);
+        try self.matchers.getPtr(event).append(self.allocator, matcher);
     }
 
     pub fn invokeHooks(self: *HookConfig, input: HookInput) HookOutput {

@@ -33,10 +33,23 @@
 //! try client.connect();
 //! try client.query("Hello!");
 //!
-//! for (try client.receiveResponse()) |msg| {
+//! var response = try client.receiveResponse();
+//! defer response.deinit();
+//! for (response.messages) |msg| {
 //!     // Process messages
 //! }
 //! ```
+//!
+//! ## Memory Ownership
+//!
+//! **Important:** Message contents (text, tool inputs, etc.) are borrowed from
+//! the underlying JSON parser. Their lifetime depends on how you obtain messages:
+//!
+//! - `QueryIterator.next()`: Content valid until next `next()` call
+//! - `Client.receiveMessage()`: Content valid until next `receiveMessage()` call
+//! - `Client.receiveResponse()`: All content valid until `response.deinit()`
+//!
+//! If you need to keep message content longer, copy the strings you need.
 
 const std = @import("std");
 
@@ -75,6 +88,7 @@ pub const QueryIterator = query_mod.QueryIterator;
 
 pub const client = @import("client.zig");
 pub const Client = client.Client;
+pub const Response = client.Response;
 
 pub const hooks = @import("hooks.zig");
 pub const HookEvent = hooks.HookEvent;

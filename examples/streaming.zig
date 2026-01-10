@@ -34,10 +34,10 @@ pub fn main() !void {
 
     try client.query("What's your name? Keep it brief.");
 
-    const response1 = try client.receiveResponse();
-    defer allocator.free(response1);
+    var response1 = try client.receiveResponse();
+    defer response1.deinit();
 
-    for (response1) |msg| {
+    for (response1.messages) |msg| {
         switch (msg) {
             .assistant => |m| {
                 for (m.content) |block| {
@@ -59,10 +59,10 @@ pub fn main() !void {
 
     try client.query("What did I just ask you?");
 
-    const response2 = try client.receiveResponse();
-    defer allocator.free(response2);
+    var response2 = try client.receiveResponse();
+    defer response2.deinit();
 
-    for (response2) |msg| {
+    for (response2.messages) |msg| {
         switch (msg) {
             .assistant => |m| {
                 for (m.content) |block| {
