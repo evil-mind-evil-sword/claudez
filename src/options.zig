@@ -104,168 +104,168 @@ pub const Options = struct {
 
     /// Build CLI command arguments for one-shot query mode.
     pub fn buildQueryCommand(self: Options, allocator: Allocator, prompt: []const u8) ![]const []const u8 {
-        var args = std.ArrayList([]const u8).init(allocator);
-        errdefer args.deinit();
+        var args: std.ArrayList([]const u8) = .empty;
+        errdefer args.deinit(allocator);
 
         // Base command
-        try args.append("claude");
-        try args.append("--output-format");
-        try args.append("stream-json");
-        try args.append("--verbose");
+        try args.append(allocator, "claude");
+        try args.append(allocator, "--output-format");
+        try args.append(allocator, "stream-json");
+        try args.append(allocator, "--verbose");
 
         // Add all options
-        try self.appendCommonArgs(&args);
+        try self.appendCommonArgs(allocator, &args);
 
         // One-shot mode
-        try args.append("--print");
-        try args.append("--");
-        try args.append(prompt);
+        try args.append(allocator, "--print");
+        try args.append(allocator, "--");
+        try args.append(allocator, prompt);
 
-        return args.toOwnedSlice();
+        return args.toOwnedSlice(allocator);
     }
 
     /// Build CLI command arguments for streaming mode.
     pub fn buildStreamingCommand(self: Options, allocator: Allocator) ![]const []const u8 {
-        var args = std.ArrayList([]const u8).init(allocator);
-        errdefer args.deinit();
+        var args: std.ArrayList([]const u8) = .empty;
+        errdefer args.deinit(allocator);
 
         // Base command
-        try args.append("claude");
-        try args.append("--output-format");
-        try args.append("stream-json");
-        try args.append("--verbose");
-        try args.append("--input-format");
-        try args.append("stream-json");
+        try args.append(allocator, "claude");
+        try args.append(allocator, "--output-format");
+        try args.append(allocator, "stream-json");
+        try args.append(allocator, "--verbose");
+        try args.append(allocator, "--input-format");
+        try args.append(allocator, "stream-json");
 
         // Add all options
-        try self.appendCommonArgs(&args);
+        try self.appendCommonArgs(allocator, &args);
 
-        return args.toOwnedSlice();
+        return args.toOwnedSlice(allocator);
     }
 
-    fn appendCommonArgs(self: Options, args: *std.ArrayList([]const u8)) !void {
+    fn appendCommonArgs(self: Options, allocator: Allocator, args: *std.ArrayList([]const u8)) !void {
         // System prompt
         if (self.system_prompt) |sp| {
             switch (sp) {
                 .custom => |s| {
-                    try args.append("--system-prompt");
-                    try args.append(s);
+                    try args.append(allocator,"--system-prompt");
+                    try args.append(allocator,s);
                 },
                 .empty => {
-                    try args.append("--system-prompt");
-                    try args.append("");
+                    try args.append(allocator,"--system-prompt");
+                    try args.append(allocator,"");
                 },
                 .append => |s| {
-                    try args.append("--append-system-prompt");
-                    try args.append(s);
+                    try args.append(allocator,"--append-system-prompt");
+                    try args.append(allocator,s);
                 },
             }
         }
 
         // Tools
         if (self.tools) |tools| {
-            try args.append("--tools");
+            try args.append(allocator,"--tools");
             if (tools.len == 0) {
-                try args.append("");
+                try args.append(allocator,"");
             } else {
                 // Join with commas - caller must ensure this is allocated
-                try args.append(tools[0]); // Simplified for now
+                try args.append(allocator,tools[0]); // Simplified for now
             }
         }
 
         if (self.allowed_tools) |tools| {
-            try args.append("--allowedTools");
-            try args.append(tools[0]); // Simplified
+            try args.append(allocator,"--allowedTools");
+            try args.append(allocator,tools[0]); // Simplified
         }
 
         if (self.disallowed_tools) |tools| {
-            try args.append("--disallowedTools");
-            try args.append(tools[0]); // Simplified
+            try args.append(allocator,"--disallowedTools");
+            try args.append(allocator,tools[0]); // Simplified
         }
 
         // Model
         if (self.model) |model| {
-            try args.append("--model");
-            try args.append(model);
+            try args.append(allocator,"--model");
+            try args.append(allocator,model);
         }
 
         if (self.fallback_model) |model| {
-            try args.append("--fallback-model");
-            try args.append(model);
+            try args.append(allocator,"--fallback-model");
+            try args.append(allocator,model);
         }
 
         // Limits
         if (self.max_turns) |turns| {
-            try args.append("--max-turns");
+            try args.append(allocator,"--max-turns");
             var buf: [16]u8 = undefined;
             const slice = std.fmt.bufPrint(&buf, "{d}", .{turns}) catch "1";
-            try args.append(slice);
+            try args.append(allocator,slice);
         }
 
         if (self.max_budget_usd) |budget| {
-            try args.append("--max-budget-usd");
+            try args.append(allocator,"--max-budget-usd");
             var buf: [32]u8 = undefined;
             const slice = std.fmt.bufPrint(&buf, "{d:.2}", .{budget}) catch "1.00";
-            try args.append(slice);
+            try args.append(allocator,slice);
         }
 
         // Permission mode
         if (self.permission_mode != .default) {
-            try args.append("--permission-mode");
-            try args.append(self.permission_mode.toCliFlag());
+            try args.append(allocator,"--permission-mode");
+            try args.append(allocator,self.permission_mode.toCliFlag());
         }
 
         // Session management
         if (self.continue_conversation) {
-            try args.append("--continue");
+            try args.append(allocator,"--continue");
         }
 
         if (self.resume_session) |session| {
-            try args.append("--resume");
-            try args.append(session);
+            try args.append(allocator,"--resume");
+            try args.append(allocator,session);
         }
 
         // Advanced options
         if (self.betas) |betas| {
-            try args.append("--betas");
-            try args.append(betas[0]); // Simplified
+            try args.append(allocator,"--betas");
+            try args.append(allocator,betas[0]); // Simplified
         }
 
         if (self.max_thinking_tokens) |tokens| {
-            try args.append("--max-thinking-tokens");
+            try args.append(allocator,"--max-thinking-tokens");
             var buf: [16]u8 = undefined;
             const slice = std.fmt.bufPrint(&buf, "{d}", .{tokens}) catch "1024";
-            try args.append(slice);
+            try args.append(allocator,slice);
         }
 
         if (self.json_schema) |schema| {
-            try args.append("--json-schema");
-            try args.append(schema);
+            try args.append(allocator,"--json-schema");
+            try args.append(allocator,schema);
         }
 
         if (self.add_dirs) |dirs| {
             for (dirs) |dir| {
-                try args.append("--add-dir");
-                try args.append(dir);
+                try args.append(allocator,"--add-dir");
+                try args.append(allocator,dir);
             }
         }
 
         if (self.include_partial_messages) {
-            try args.append("--include-partial-messages");
+            try args.append(allocator,"--include-partial-messages");
         }
 
         if (self.fork_session) {
-            try args.append("--fork-session");
+            try args.append(allocator,"--fork-session");
         }
 
         if (self.mcp_config) |config| {
-            try args.append("--mcp-config");
-            try args.append(config);
+            try args.append(allocator,"--mcp-config");
+            try args.append(allocator,config);
         }
 
         if (self.settings) |s| {
-            try args.append("--settings");
-            try args.append(s);
+            try args.append(allocator,"--settings");
+            try args.append(allocator,s);
         }
     }
 };

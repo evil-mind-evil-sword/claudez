@@ -95,7 +95,7 @@ pub const Transport = struct {
     stdout_thread: ?std.Thread = null,
     stderr_thread: ?std.Thread = null,
     message_queue: MessageQueue,
-    stderr_buffer: std.ArrayList(u8),
+    stderr_buffer: std.ArrayList(u8) = .empty,
     write_mutex: std.Thread.Mutex = .{},
     connected: bool = false,
     cli_path: []const u8,
@@ -107,7 +107,6 @@ pub const Transport = struct {
         return .{
             .allocator = allocator,
             .message_queue = MessageQueue.init(allocator),
-            .stderr_buffer = std.ArrayList(u8).init(allocator),
             .cli_path = cli,
             .options = opts,
         };
@@ -116,7 +115,7 @@ pub const Transport = struct {
     pub fn deinit(self: *Transport) void {
         self.close();
         self.message_queue.deinit();
-        self.stderr_buffer.deinit();
+        self.stderr_buffer.deinit(self.allocator);
         if (self.options.cli_path == null) {
             self.allocator.free(self.cli_path);
         }
@@ -159,9 +158,9 @@ pub const Transport = struct {
 
     fn spawnProcess(self: *Transport, argv: []const []const u8) !void {
         var child = std.process.Child.init(argv, self.allocator);
-        child.stdin_behavior = .pipe;
-        child.stdout_behavior = .pipe;
-        child.stderr_behavior = .pipe;
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
 
         if (self.options.cwd) |cwd| {
             child.cwd = cwd;
@@ -180,8 +179,8 @@ pub const Transport = struct {
 
     fn readStdoutThread(self: *Transport, stdout: std.fs.File) void {
         var buffer: [64 * 1024]u8 = undefined;
-        var line_buffer = std.ArrayList(u8).init(self.allocator);
-        defer line_buffer.deinit();
+        var line_buffer: std.ArrayList(u8) = .empty;
+        defer line_buffer.deinit(self.allocator);
 
         while (true) {
             const bytes_read = stdout.read(&buffer) catch break;
@@ -200,7 +199,7 @@ pub const Transport = struct {
                         line_buffer.clearRetainingCapacity();
                     }
                 } else {
-                    line_buffer.append(byte) catch break;
+                    line_buffer.append(self.allocator, byte) catch break;
                 }
             }
         }
@@ -215,7 +214,7 @@ pub const Transport = struct {
             const bytes_read = stderr.read(&buffer) catch break;
             if (bytes_read == 0) break;
 
-            self.stderr_buffer.appendSlice(buffer[0..bytes_read]) catch break;
+            self.stderr_buffer.appendSlice(self.allocator, buffer[0..bytes_read]) catch break;
         }
     }
 

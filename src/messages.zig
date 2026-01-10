@@ -35,7 +35,7 @@ pub const ContentBlock = union(enum) {
     tool_use: ToolUseBlock,
     tool_result: ToolResultBlock,
 
-    pub fn fromJson(allocator: Allocator, value: std.json.Value) !ContentBlock {
+    pub fn fromJson(_: Allocator, value: std.json.Value) !ContentBlock {
         const obj = value.object;
         const block_type = obj.get("type") orelse return error.MalformedMessage;
 
@@ -149,16 +149,16 @@ pub const Message = union(enum) {
             const content_array = message.object.get("content") orelse return error.MalformedMessage;
             const model = if (message.object.get("model")) |m| m.string else null;
 
-            var blocks = std.ArrayList(ContentBlock).init(allocator);
-            errdefer blocks.deinit();
+            var blocks: std.ArrayList(ContentBlock) = .empty;
+            errdefer blocks.deinit(allocator);
 
             for (content_array.array.items) |item| {
                 const block = try ContentBlock.fromJson(allocator, item);
-                try blocks.append(block);
+                try blocks.append(allocator, block);
             }
 
             return .{ .assistant = .{
-                .content = try blocks.toOwnedSlice(),
+                .content = try blocks.toOwnedSlice(allocator),
                 .model = model,
                 .is_error = if (obj.get("is_error")) |e| e.bool else false,
             } };

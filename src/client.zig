@@ -136,15 +136,15 @@ pub const Client = struct {
 
     /// Receive messages until a ResultMessage.
     pub fn receiveResponse(self: *Client) ![]Message {
-        var result = std.ArrayList(Message).init(self.allocator);
-        errdefer result.deinit();
+        var result: std.ArrayList(Message) = .empty;
+        errdefer result.deinit(self.allocator);
 
         while (try self.receiveMessage()) |msg| {
-            try result.append(msg);
+            try result.append(self.allocator, msg);
             if (msg == .result) break;
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Send interrupt signal.

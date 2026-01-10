@@ -110,15 +110,15 @@ pub fn queryText(allocator: Allocator, prompt: []const u8, opts: ?Options) ![]co
     var iter = try query(allocator, prompt, opts);
     defer iter.deinit();
 
-    var result = std.ArrayList(u8).init(allocator);
-    errdefer result.deinit();
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
 
     while (try iter.next()) |msg| {
         switch (msg) {
             .assistant => |m| {
                 for (m.content) |block| {
                     switch (block) {
-                        .text => |t| try result.appendSlice(t.text),
+                        .text => |t| try result.appendSlice(allocator, t.text),
                         else => {},
                     }
                 }
@@ -127,5 +127,5 @@ pub fn queryText(allocator: Allocator, prompt: []const u8, opts: ?Options) ![]co
         }
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
