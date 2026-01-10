@@ -1,24 +1,24 @@
 # claudez
 
-Claude Code SDK for Zig - programmatic access to Claude's agentic capabilities.
+Zig SDK for Claude Code. Embed Claude's agentic capabilities in Zig applications.
 
-## Overview
+## What It Does
 
-claudez wraps the Claude Code CLI, providing a native Zig interface for:
+claudez wraps the Claude Code CLI to provide programmatic access from Zig. The SDK spawns `claude` as a subprocess and communicates via NDJSON streaming, giving you:
 
-- **One-shot queries** - Simple fire-and-forget interactions
-- **Streaming client** - Bidirectional conversations with control protocol
-- **Hooks** - Intercept and control Claude's operations
-- **MCP servers** - Define custom in-process tools
+- **One-shot queries** — Send a prompt, iterate over responses
+- **Streaming client** — Multi-turn conversations with session continuity
+- **Hooks** — Intercept tool calls before/after execution
+- **MCP tools** — Define custom tools Claude can invoke
 
 ## Requirements
 
-- Zig 0.15.0+
-- Claude Code CLI (`claude`) installed and in PATH
+- Zig 0.15.0 or later
+- Claude Code CLI installed (`claude` in PATH)
 
 ## Installation
 
-Add as a dependency in `build.zig.zon`:
+Add to `build.zig.zon`:
 
 ```zig
 .dependencies = .{
@@ -31,41 +31,64 @@ Add as a dependency in `build.zig.zon`:
 Then in `build.zig`:
 
 ```zig
-const claudez = b.dependency("claudez", .{
+const claudez_dep = b.dependency("claudez", .{
     .target = target,
     .optimize = optimize,
 });
-exe.root_module.addImport("claudez", claudez.module("claudez"));
+exe.root_module.addImport("claudez", claudez_dep.module("claudez"));
 ```
 
-## Quick Start
+## Usage
 
-### One-shot Query
+### One-Shot Query
+
+The simplest way to interact with Claude. Send a prompt, receive messages until completion.
 
 ```zig
+const std = @import("std");
 const claudez = @import("claudez");
 
-var iter = try claudez.query(allocator, "What is 2+2?", null);
-defer iter.deinit();
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-while (try iter.next()) |msg| {
-    switch (msg) {
-        .assistant => |m| {
-            for (m.content) |block| {
-                if (block == .text) {
-                    std.debug.print("{s}", .{block.text.text});
+    // Query with options
+    var iter = try claudez.query(allocator, "What is 2+2?", .{
+        .max_turns = 1,
+    });
+    defer iter.deinit();
+
+    // Process response messages
+    while (try iter.next()) |msg| {
+        switch (msg) {
+            .assistant => |m| {
+                for (m.content) |block| {
+                    if (block == .text) {
+                        std.debug.print("{s}", .{block.text.text});
+                    }
                 }
-            }
-        },
-        .result => |r| {
-            std.debug.print("\nCost: ${d:.4}\n", .{r.total_cost_usd});
-        },
-        else => {},
+            },
+            .result => |r| {
+                std.debug.print("\nCost: ${d:.4}\n", .{r.total_cost_usd});
+            },
+            else => {},
+        }
     }
 }
 ```
 
+For simple text extraction:
+
+```zig
+const response = try claudez.queryText(allocator, "What is 2+2?", null);
+defer allocator.free(response);
+std.debug.print("{s}\n", .{response});
+```
+
 ### Streaming Client
+
+For multi-turn conversations, the streaming client maintains session state between queries.
 
 ```zig
 var client = try claudez.Client.init(allocator, .{
@@ -75,74 +98,148 @@ var client = try claudez.Client.init(allocator, .{
 defer client.deinit();
 
 try client.connect();
-try client.query("Hello!");
 
-for (try client.receiveResponse()) |msg| {
-    // Process messages
+// First turn
+try client.query("Hello, my name is Alice.");
+var response1 = try client.receiveResponse();
+defer response1.deinit();
+
+for (response1.messages) |msg| {
+    // Process messages...
 }
+
+// Second turn (Claude remembers the conversation)
+try client.query("What's my name?");
+var response2 = try client.receiveResponse();
+defer response2.deinit();
 ```
 
-### Custom Options
+### Configuration Options
+
+The `Options` struct controls Claude's behavior:
 
 ```zig
 const opts = claudez.Options{
+    // Model selection
     .model = "claude-sonnet-4-5",
-    .max_turns = 5,
-    .max_budget_usd = 1.0,
-    .system_prompt = .{ .custom = "You are a helpful assistant." },
-    .allowed_tools = &.{ "Read", "Write" },
-    .permission_mode = .accept_edits,
-};
+    .fallback_model = "claude-haiku-4",
 
-var iter = try claudez.query(allocator, "Help me code", opts);
+    // Limits
+    .max_turns = 10,
+    .max_budget_usd = 1.0,
+
+    // System prompt
+    .system_prompt = .{ .custom = "You are a helpful coding assistant." },
+    // Or: .system_prompt = .{ .append = "Additional context..." },
+    // Or: .system_prompt = .empty,
+
+    // Tool control
+    .tools = &.{ "Read", "Write", "Bash" },
+    .allowed_tools = &.{ "Read" },      // Whitelist
+    .disallowed_tools = &.{ "Bash" },   // Blacklist
+
+    // Permissions
+    .permission_mode = .accept_edits,   // .default, .plan, .bypass_permissions
+
+    // Session management
+    .continue_conversation = true,
+    .resume_session = "session-id",
+
+    // Advanced
+    .max_thinking_tokens = 10000,
+    .mcp_config = "/path/to/mcp.json",
+    .add_dirs = &.{ "/allowed/path" },
+};
 ```
+
+## Memory Ownership
+
+Message contents are borrowed from the JSON parser. Their lifetime depends on how you obtain them:
+
+| Method | Content Valid Until |
+|--------|---------------------|
+| `QueryIterator.next()` | Next `next()` call |
+| `Client.receiveMessage()` | Next `receiveMessage()` call |
+| `Client.receiveResponse()` | `response.deinit()` |
+
+Copy strings with `allocator.dupe(u8, text)` if you need them longer.
 
 ## API Reference
 
-### Core Types
+### Core Functions
 
-- `Options` - Configuration for Claude interactions
-- `Message` - Discriminated union of message types
-- `ContentBlock` - Text, thinking, tool_use, or tool_result
+| Function | Description |
+|----------|-------------|
+| `query(allocator, prompt, options)` | One-shot query, returns message iterator |
+| `queryText(allocator, prompt, options)` | One-shot query, returns combined text |
 
-### Functions
+### Client Methods
 
-- `query(allocator, prompt, options)` - One-shot query returning message iterator
-- `queryText(allocator, prompt, options)` - One-shot query returning combined text
+| Method | Description |
+|--------|-------------|
+| `Client.init(allocator, options)` | Create streaming client |
+| `client.connect()` | Connect to Claude |
+| `client.query(prompt)` | Send query in current session |
+| `client.receiveMessage()` | Receive single message (blocks) |
+| `client.receiveResponse()` | Receive all messages until result |
+| `client.interrupt()` | Send interrupt signal |
+| `client.setPermissionMode(mode)` | Change permission mode |
+| `client.setModel(model)` | Switch model mid-session |
+| `client.disconnect()` | Disconnect from Claude |
+| `client.deinit()` | Clean up resources |
 
-### Client
+### Message Types
 
-- `Client.init(allocator, options)` - Create streaming client
-- `client.connect()` - Connect to Claude
-- `client.query(prompt)` - Send a query
-- `client.receiveMessages()` - Iterator over all messages
-- `client.receiveResponse()` - Receive until ResultMessage
-- `client.interrupt()` - Send interrupt signal
-- `client.setPermissionMode(mode)` - Change permission mode
-- `client.setModel(model)` - Change model
-- `client.disconnect()` - Disconnect
-- `client.deinit()` - Clean up
+```zig
+const Message = union(enum) {
+    user: UserMessage,
+    assistant: AssistantMessage,
+    system: SystemMessage,
+    result: ResultMessage,
+    stream_event: StreamEvent,
+};
+
+const ContentBlock = union(enum) {
+    text: TextBlock,
+    thinking: ThinkingBlock,
+    tool_use: ToolUseBlock,
+    tool_result: ToolResultBlock,
+};
+```
 
 ### Hooks
 
-- `HookConfig.init(allocator)` - Create hook configuration
-- `hookConfig.addHook(event, matcher)` - Register hook
-- `hookConfig.invokeHooks(input)` - Invoke matching hooks
+Intercept Claude's operations:
 
-### MCP
+```zig
+var hooks = claudez.HookConfig.init(allocator);
+defer hooks.deinit();
 
-- `createSdkMcpServer(allocator, name, version, tools)` - Create MCP server
-- `server.addTool(tool)` - Register tool
-- `server.invokeTool(name, args, context)` - Invoke tool
+hooks.addHook(.pre_tool_use, .{
+    .matcher = "Write",  // Match tool name
+    .callback = myCallback,
+}) catch {};
+```
+
+### MCP Tools
+
+Define custom tools:
+
+```zig
+const my_tool = claudez.Tool{
+    .name = "get_weather",
+    .description = "Get current weather for a location",
+    .input_schema = schema,
+    .handler = weatherHandler,
+};
+
+var server = try claudez.createSdkMcpServer(allocator, "my-server", "1.0", &.{my_tool});
+defer server.deinit();
+```
 
 ## Examples
 
-See `examples/` directory:
-
-- `simple_query.zig` - Basic one-shot query
-- `streaming.zig` - Multi-turn streaming conversation
-
-Build and run:
+Build and run the included examples:
 
 ```bash
 zig build
