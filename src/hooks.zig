@@ -200,6 +200,11 @@ pub const HookOutput = struct {
 };
 
 /// Hook callback function type.
+///
+/// Callbacks are intentionally infallible - they must always return a decision.
+/// If your callback encounters an error, return `HookOutput.block("error: <reason>")`
+/// to signal the failure. This design ensures hooks never leave Claude in an
+/// undefined state.
 pub const HookCallback = *const fn (input: HookInput, context: ?*anyopaque) HookOutput;
 
 /// Hook matcher configuration.
@@ -208,8 +213,6 @@ pub const HookMatcher = struct {
     matcher: ?[]const u8 = null,
     /// Callback function.
     callback: HookCallback,
-    /// Optional timeout in milliseconds.
-    timeout_ms: ?u32 = null,
     /// User context passed to callback.
     context: ?*anyopaque = null,
 };

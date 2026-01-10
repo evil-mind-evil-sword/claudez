@@ -67,6 +67,7 @@ pub const Client = struct {
     request_counter: u64 = 0,
     pending_requests: std.AutoHashMap(u64, PendingRequest),
     current_parsed: ?std.json.Parsed(std.json.Value) = null,
+    current_message: ?Message = null,
     session_id: ?[]const u8 = null,
     hook_config: ?*HookConfig = null,
     cwd: []const u8 = ".",
@@ -99,10 +100,10 @@ pub const Client = struct {
 
         const session = self.session_id orelse "default";
 
-        // Build user message JSON
-        var json_buf: [64 * 1024]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&json_buf);
-        const writer = stream.writer();
+        // Build user message JSON with dynamic buffer (prompts can be large)
+        var json_buf: std.ArrayList(u8) = .empty;
+        defer json_buf.deinit(self.allocator);
+        const writer = json_buf.writer(self.allocator);
 
         try writer.writeAll("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"");
         try writeEscapedJson(prompt, writer);
@@ -110,7 +111,7 @@ pub const Client = struct {
         try writeEscapedJson(session, writer);
         try writer.writeAll("\"}\n");
 
-        try self.transport.write(stream.getWritten());
+        try self.transport.write(json_buf.items);
     }
 
     /// Iterator for receiving messages.
@@ -128,53 +129,75 @@ pub const Client = struct {
     }
 
     /// Receive a single message (blocks until available).
+    ///
+    /// The returned message is valid until the next call to `receiveMessage()`,
+    /// `receiveResponse()`, or `deinit()`. If you need to retain the message
+    /// data beyond that, copy the relevant fields.
     pub fn receiveMessage(self: *Client) !?Message {
+        // Free previous message content blocks (e.g., from assistant messages)
+        if (self.current_message) |msg| {
+            msg.deinit(self.allocator);
+            self.current_message = null;
+        }
+
         // Free previous parsed value
         if (self.current_parsed) |*p| {
             p.deinit();
             self.current_parsed = null;
         }
 
-        const json_bytes = self.transport.readMessage() orelse return null;
-        defer self.allocator.free(json_bytes);
+        // Loop to skip control messages and empty lines (avoids recursion/stack overflow)
+        while (true) {
+            const json_bytes = self.transport.readMessage() orelse return null;
+            defer self.allocator.free(json_bytes);
 
-        if (json_bytes.len == 0) {
-            return self.receiveMessage();
-        }
+            // Skip empty lines
+            if (json_bytes.len == 0) continue;
 
-        self.current_parsed = Message.parse(self.allocator, json_bytes) catch {
-            return ClaudeError.JsonParseError;
-        };
-
-        const value = self.current_parsed.?.value;
-
-        // Check for control messages
-        if (value.object.get("type")) |t| {
-            if (std.mem.eql(u8, t.string, "control_response")) {
-                try self.handleControlResponse(value);
-                return self.receiveMessage(); // Skip control messages
-            } else if (std.mem.eql(u8, t.string, "control_request")) {
-                try self.handleControlRequest(value);
-                return self.receiveMessage(); // Skip control requests
+            // Free any parsed value from previous loop iteration
+            if (self.current_parsed) |*p| {
+                p.deinit();
+                self.current_parsed = null;
             }
-        }
 
-        const msg = Message.fromJson(self.allocator, value) catch {
-            return ClaudeError.MalformedMessage;
-        };
+            self.current_parsed = Message.parse(self.allocator, json_bytes) catch {
+                return ClaudeError.JsonParseError;
+            };
 
-        // Capture session_id from result messages for multi-turn continuity
-        if (msg == .result) {
-            if (msg.result.session_id) |sid| {
-                // Free previous session_id if we allocated it
-                if (self.session_id) |old_sid| {
-                    self.allocator.free(old_sid);
+            const value = self.current_parsed.?.value;
+
+            // Check for control messages - handle and continue loop
+            if (value.object.get("type")) |t| {
+                if (std.mem.eql(u8, t.string, "control_response")) {
+                    try self.handleControlResponse(value);
+                    continue; // Skip control messages
+                } else if (std.mem.eql(u8, t.string, "control_request")) {
+                    try self.handleControlRequest(value);
+                    continue; // Skip control requests
                 }
-                self.session_id = self.allocator.dupe(u8, sid) catch null;
             }
-        }
 
-        return msg;
+            // Normal message - parse and return
+            const msg = Message.fromJson(self.allocator, value) catch {
+                return ClaudeError.MalformedMessage;
+            };
+
+            // Capture session_id from result messages for multi-turn continuity
+            if (msg == .result) {
+                if (msg.result.session_id) |sid| {
+                    // Free previous session_id if we allocated it
+                    if (self.session_id) |old_sid| {
+                        self.allocator.free(old_sid);
+                    }
+                    self.session_id = self.allocator.dupe(u8, sid) catch null;
+                }
+            }
+
+            // Store for cleanup on next iteration
+            self.current_message = msg;
+
+            return msg;
+        }
     }
 
     /// Receive messages until a ResultMessage.
@@ -337,16 +360,41 @@ pub const Client = struct {
 
         const sid = self.session_id orelse return ClaudeError.NotConnected;
 
-        // Update options to resume the session
+        // Clean up any pending message state from previous connection
+        if (self.current_message) |msg| {
+            msg.deinit(self.allocator);
+            self.current_message = null;
+        }
+        if (self.current_parsed) |*p| {
+            p.deinit();
+            self.current_parsed = null;
+        }
+
+        // Update options to resume the session.
+        // Safe to borrow sid - buildStreamingCommand copies it into cmd_arena.
         self.options.resume_session = sid;
+        errdefer self.options.resume_session = null;
 
-        // Close any existing transport state
+        // Create new transport BEFORE destroying old one.
+        // If init fails, self.transport still has valid old transport for cleanup.
+        const new_transport = try Transport.init(self.allocator, self.options);
+
+        // Success - destroy old transport and swap
         self.transport.deinit();
+        self.transport = new_transport;
 
-        // Reinitialize transport with updated options
-        self.transport = try Transport.init(self.allocator, self.options);
+        // Clear transport's copy on error to avoid dangling pointers.
+        // Note: No errdefer for transport.deinit() - client.deinit() handles cleanup.
+        errdefer self.transport.options.resume_session = null;
+
         try self.transport.connectStreaming();
         self.connected = true;
+
+        // Clear resume_session in BOTH client and transport options.
+        // Transport made a copy of options, so we must clear both to prevent
+        // use-after-free if session_id is later freed and user calls disconnect+connect.
+        self.options.resume_session = null;
+        self.transport.options.resume_session = null;
 
         // Send initialization handshake
         try self.sendControlRequest(.initialize, .{});
@@ -361,6 +409,9 @@ pub const Client = struct {
     /// Clean up resources.
     pub fn deinit(self: *Client) void {
         self.disconnect();
+        if (self.current_message) |msg| {
+            msg.deinit(self.allocator);
+        }
         if (self.current_parsed) |*p| {
             p.deinit();
         }

@@ -29,11 +29,18 @@ pub const ToolResultBlock = struct {
 };
 
 /// Content block discriminated union.
+/// Unknown content block for forward compatibility.
+pub const UnknownBlock = struct {
+    block_type: []const u8,
+    data: std.json.Value,
+};
+
 pub const ContentBlock = union(enum) {
     text: TextBlock,
     thinking: ThinkingBlock,
     tool_use: ToolUseBlock,
     tool_result: ToolResultBlock,
+    unknown: UnknownBlock,
 
     pub fn fromJson(_: Allocator, value: std.json.Value) !ContentBlock {
         const obj = value.object;
@@ -63,14 +70,38 @@ pub const ContentBlock = union(enum) {
             const tool_use_id = obj.get("tool_use_id") orelse return error.MalformedMessage;
             const content = obj.get("content") orelse return error.MalformedMessage;
             const is_error = if (obj.get("is_error")) |e| e.bool else false;
+            // Content can be a string or an array of content blocks
+            const content_str = switch (content) {
+                .string => content.string,
+                .array => blk: {
+                    // Extract text from first text content block
+                    for (content.array.items) |item| {
+                        if (item == .object) {
+                            if (item.object.get("type")) |t| {
+                                if (t == .string and std.mem.eql(u8, t.string, "text")) {
+                                    if (item.object.get("text")) |txt| {
+                                        if (txt == .string) break :blk txt.string;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break :blk "";
+                },
+                else => "",
+            };
             return .{ .tool_result = .{
                 .tool_use_id = tool_use_id.string,
-                .content = if (content == .string) content.string else "",
+                .content = content_str,
                 .is_error = is_error,
             } };
         }
 
-        return error.MalformedMessage;
+        // Unknown content block type - preserve for forward compatibility
+        return .{ .unknown = .{
+            .block_type = type_str,
+            .data = value,
+        } };
     }
 };
 
@@ -242,9 +273,9 @@ pub const Message = union(enum) {
         } else if (std.mem.eql(u8, type_str, "result")) {
             return .{ .result = .{
                 .total_cost_usd = if (obj.get("total_cost_usd")) |c| c.float else 0,
-                .duration_ms = if (obj.get("duration_ms")) |d| @intCast(d.integer) else 0,
-                .duration_api_ms = if (obj.get("duration_api_ms")) |d| @intCast(d.integer) else 0,
-                .num_turns = if (obj.get("num_turns")) |n| @intCast(n.integer) else 0,
+                .duration_ms = if (obj.get("duration_ms")) |d| std.math.cast(u64, d.integer) orelse 0 else 0,
+                .duration_api_ms = if (obj.get("duration_api_ms")) |d| std.math.cast(u64, d.integer) orelse 0 else 0,
+                .num_turns = if (obj.get("num_turns")) |n| std.math.cast(u32, n.integer) orelse 0 else 0,
                 .is_error = if (obj.get("is_error")) |e| e.bool else false,
                 .session_id = if (obj.get("session_id")) |s| s.string else null,
             } };
@@ -264,7 +295,9 @@ pub const Message = union(enum) {
     }
 };
 
-/// Extract text content from an assistant message.
+/// Extract the first text content block from an assistant message.
+/// Returns an empty string if no text blocks are present.
+/// For messages with multiple text blocks, iterate `msg.content` directly.
 pub fn getTextContent(msg: AssistantMessage) []const u8 {
     for (msg.content) |block| {
         switch (block) {
@@ -273,6 +306,22 @@ pub fn getTextContent(msg: AssistantMessage) []const u8 {
         }
     }
     return "";
+}
+
+/// Concatenate all text content blocks from an assistant message.
+/// Caller owns the returned slice and must free it.
+pub fn getAllTextContent(allocator: Allocator, msg: AssistantMessage) ![]const u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    for (msg.content) |block| {
+        switch (block) {
+            .text => |t| try result.appendSlice(allocator, t.text),
+            else => {},
+        }
+    }
+
+    return result.toOwnedSlice(allocator);
 }
 
 /// Parse text content as JSON (for structured output).

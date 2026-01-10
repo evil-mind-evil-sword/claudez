@@ -9,8 +9,14 @@
 //! const mcp = @import("claudez").mcp;
 //!
 //! fn myToolHandler(args: std.json.Value, ctx: *mcp.ToolContext) mcp.ToolResult {
+//!     // Success: content array on stack is fine since it's used before function returns
 //!     const content = [_]mcp.ContentItem{mcp.ContentItem.textContent("Hello!")};
 //!     return mcp.ToolResult.success(&content);
+//! }
+//!
+//! fn myToolWithError(args: std.json.Value, ctx: *mcp.ToolContext) mcp.ToolResult {
+//!     // Error: use ctx.makeError() which stores content in the context (safe lifetime)
+//!     return ctx.makeError("Something went wrong");
 //! }
 //!
 //! pub fn main() !void {
@@ -67,9 +73,12 @@ pub const ToolResult = struct {
         return .{ .content = content };
     }
 
-    pub fn err(message: []const u8) ToolResult {
+    /// Create an error result from caller-provided content.
+    /// The content slice must outlive the ToolResult.
+    /// For convenience in handlers, use `ToolContext.makeError()` instead.
+    pub fn errFrom(content: []const ContentItem) ToolResult {
         return .{
-            .content = &[_]ContentItem{ContentItem.textContent(message)},
+            .content = content,
             .is_error = true,
         };
     }
@@ -129,6 +138,24 @@ pub const ToolContext = struct {
     allocator: Allocator,
     session_id: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+
+    /// Storage for error content. Handlers should use `makeError()` instead of
+    /// constructing ToolResult directly to avoid dangling pointer issues.
+    error_content: [1]ContentItem = undefined,
+
+    /// Create an error ToolResult safely. The error content array is stored in
+    /// the context, which outlives the returned ToolResult.
+    ///
+    /// IMPORTANT: The `message` slice must outlive the ToolResult. This is satisfied
+    /// when using string literals (recommended) or strings from longer-lived sources.
+    /// Do NOT use stack-allocated buffers (e.g., from `bufPrint`) for the message.
+    pub fn makeError(self: *ToolContext, message: []const u8) ToolResult {
+        self.error_content[0] = ContentItem.textContent(message);
+        return .{
+            .content = &self.error_content,
+            .is_error = true,
+        };
+    }
 };
 
 /// Tool handler function type.
@@ -216,6 +243,9 @@ pub const McpServer = struct {
 
     /// Run the MCP server, reading JSON-RPC requests from stdin and writing responses to stdout.
     /// This blocks until stdin is closed or an error occurs.
+    ///
+    /// Note: Individual JSON-RPC messages are limited to 64KB. For tools with larger
+    /// inputs/outputs, consider streaming or chunking the data.
     pub fn run(self: *McpServer) !void {
         var read_buf: [64 * 1024]u8 = undefined;
         var stdin_reader = std.fs.File.stdin().reader(&read_buf);
@@ -257,7 +287,8 @@ pub const McpServer = struct {
             return self.writeError(writer, id, -32600, "Invalid Request", "Method must be string");
         }
 
-        const params = obj.get("params") orelse std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
+        // Use null for missing params instead of allocating an ObjectMap that would leak
+        const params = obj.get("params") orelse std.json.Value{ .null = {} };
 
         if (std.mem.eql(u8, method.string, "initialize")) {
             try self.handleInitialize(writer, id);
@@ -302,7 +333,8 @@ pub const McpServer = struct {
             return self.writeError(writer, id, -32602, "Invalid params", "Tool name must be string");
         }
 
-        const args = params_obj.get("arguments") orelse std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
+        // Use null for missing arguments instead of allocating an ObjectMap that would leak
+        const args = params_obj.get("arguments") orelse std.json.Value{ .null = {} };
 
         var context = ToolContext{
             .allocator = self.allocator,

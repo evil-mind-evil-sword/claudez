@@ -77,14 +77,20 @@ pub const MessageQueue = struct {
     }
 
     pub fn deinit(self: *MessageQueue) void {
-        self.close();
-        // Free any remaining nodes
+        // Close and drain the queue while holding the mutex
+        self.mutex.lock();
+        self.closed = true;
+        self.cond.broadcast();
+
+        // Free any remaining nodes while still holding the mutex
         while (self.head) |head| {
             const next = head.next;
             self.allocator.free(head.data);
             self.allocator.destroy(head);
             self.head = next;
         }
+        self.tail = null;
+        self.mutex.unlock();
     }
 };
 
@@ -214,9 +220,28 @@ pub const Transport = struct {
         try child.spawn();
         self.process = child;
         self.connected = true;
+        errdefer {
+            // Clean up on error: close message queue, wait for process
+            self.message_queue.close();
+            if (self.process) |*proc| {
+                if (proc.stdin) |stdin| {
+                    stdin.close();
+                    proc.stdin = null;
+                }
+            }
+            _ = child.wait() catch {};
+            self.process = null;
+            self.connected = false;
+        }
 
         // Spawn stdout reader thread
         self.stdout_thread = try std.Thread.spawn(.{}, readStdoutThread, .{ self, child.stdout.? });
+        errdefer {
+            // If stderr thread fails to spawn, clean up stdout thread
+            self.message_queue.close();
+            self.stdout_thread.?.join();
+            self.stdout_thread = null;
+        }
 
         // Spawn stderr reader thread
         self.stderr_thread = try std.Thread.spawn(.{}, readStderrThread, .{ self, child.stderr.? });
@@ -294,13 +319,16 @@ pub const Transport = struct {
 
         self.message_queue.close();
 
-        // Close stdin to signal EOF to the child process
+        // Close stdin to signal EOF to the child process.
+        // Must hold write_mutex to avoid race with concurrent write() calls.
+        self.write_mutex.lock();
         if (self.process) |*proc| {
             if (proc.stdin) |stdin| {
                 stdin.close();
                 proc.stdin = null;
             }
         }
+        self.write_mutex.unlock();
 
         // Wait for process to exit BEFORE joining threads.
         // This ensures stdout/stderr pipes are closed, allowing
@@ -399,13 +427,15 @@ fn findCli(allocator: Allocator, cli_path: ?[]const u8) ![]const u8 {
         return path;
     }
 
-    // Check PATH first
+    // Check PATH first (use platform-specific delimiter: ':' on Unix, ';' on Windows)
+    const path_delimiter = if (@import("builtin").os.tag == .windows) ';' else ':';
     if (std.process.getEnvVarOwned(allocator, "PATH")) |path_env| {
         defer allocator.free(path_env);
 
-        var iter = std.mem.splitScalar(u8, path_env, ':');
+        var iter = std.mem.splitScalar(u8, path_env, path_delimiter);
         while (iter.next()) |dir| {
-            const full_path = try std.fs.path.join(allocator, &.{ dir, "claude" });
+            const exe_name = if (@import("builtin").os.tag == .windows) "claude.exe" else "claude";
+            const full_path = try std.fs.path.join(allocator, &.{ dir, exe_name });
             defer allocator.free(full_path);
 
             if (std.fs.accessAbsolute(full_path, .{})) {
