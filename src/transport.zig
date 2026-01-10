@@ -326,6 +326,65 @@ pub const Transport = struct {
     }
 };
 
+/// Validate that the CLI version meets minimum requirements.
+/// Returns the version string on success, or error if version is too old.
+pub fn validateCliVersion(allocator: Allocator, cli_path: []const u8) ![]const u8 {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{ cli_path, "--version" },
+    }) catch {
+        return ClaudeError.CliNotFound;
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    // Parse version from output (format: "claude 1.0.50" or similar)
+    const version = parseVersion(result.stdout) orelse return ClaudeError.UnsupportedCliVersion;
+
+    // Compare versions
+    if (compareVersions(version, MINIMUM_CLI_VERSION) == .lt) {
+        return ClaudeError.UnsupportedCliVersion;
+    }
+
+    return allocator.dupe(u8, version);
+}
+
+fn parseVersion(output: []const u8) ?[]const u8 {
+    // Look for version pattern: digits.digits.digits
+    var i: usize = 0;
+    while (i < output.len) : (i += 1) {
+        if (std.ascii.isDigit(output[i])) {
+            const start = i;
+            var dots: usize = 0;
+            while (i < output.len and (std.ascii.isDigit(output[i]) or output[i] == '.')) {
+                if (output[i] == '.') dots += 1;
+                i += 1;
+            }
+            if (dots >= 1) {
+                return output[start..i];
+            }
+        }
+    }
+    return null;
+}
+
+fn compareVersions(a: []const u8, b: []const u8) std.math.Order {
+    var a_iter = std.mem.splitScalar(u8, a, '.');
+    var b_iter = std.mem.splitScalar(u8, b, '.');
+
+    while (true) {
+        const a_part = a_iter.next();
+        const b_part = b_iter.next();
+
+        if (a_part == null and b_part == null) return .eq;
+        const a_num = if (a_part) |p| std.fmt.parseInt(u32, p, 10) catch 0 else 0;
+        const b_num = if (b_part) |p| std.fmt.parseInt(u32, p, 10) catch 0 else 0;
+
+        if (a_num < b_num) return .lt;
+        if (a_num > b_num) return .gt;
+    }
+}
+
 /// Find the Claude CLI binary.
 fn findCli(allocator: Allocator, cli_path: ?[]const u8) ![]const u8 {
     if (cli_path) |path| {
@@ -396,4 +455,21 @@ test "message queue" {
     try std.testing.expect(r2 != null);
     try std.testing.expectEqualStrings("world", r2.?);
     allocator.free(r2.?);
+}
+
+test "parseVersion" {
+    try std.testing.expectEqualStrings("1.0.50", parseVersion("claude 1.0.50\n").?);
+    try std.testing.expectEqualStrings("2.0.0", parseVersion("Claude Code v2.0.0\n").?);
+    try std.testing.expectEqualStrings("1.2", parseVersion("version 1.2").?);
+    try std.testing.expect(parseVersion("no version here") == null);
+    try std.testing.expect(parseVersion("") == null);
+}
+
+test "compareVersions" {
+    try std.testing.expect(compareVersions("1.0.0", "1.0.0") == .eq);
+    try std.testing.expect(compareVersions("2.0.0", "1.0.0") == .gt);
+    try std.testing.expect(compareVersions("1.0.0", "2.0.0") == .lt);
+    try std.testing.expect(compareVersions("1.0.50", "1.0.49") == .gt);
+    try std.testing.expect(compareVersions("1.1.0", "1.0.99") == .gt);
+    try std.testing.expect(compareVersions("2.0", "1.9.9") == .gt);
 }

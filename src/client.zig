@@ -9,6 +9,10 @@ const messages = @import("messages.zig");
 const Message = messages.Message;
 const ContentBlock = messages.ContentBlock;
 const ClaudeError = @import("errors.zig").ClaudeError;
+const hooks = @import("hooks.zig");
+const HookConfig = hooks.HookConfig;
+const HookInput = hooks.HookInput;
+const HookOutput = hooks.HookOutput;
 
 /// Control request types.
 pub const ControlRequestType = enum {
@@ -64,6 +68,8 @@ pub const Client = struct {
     pending_requests: std.AutoHashMap(u64, PendingRequest),
     current_parsed: ?std.json.Parsed(std.json.Value) = null,
     session_id: ?[]const u8 = null,
+    hook_config: ?*HookConfig = null,
+    cwd: []const u8 = ".",
 
     /// Initialize a new client.
     pub fn init(allocator: Allocator, opts: ?Options) !Client {
@@ -269,6 +275,83 @@ pub const Client = struct {
         });
     }
 
+    /// Set hook configuration for intercepting tool calls.
+    /// The HookConfig must outlive the Client.
+    pub fn setHooks(self: *Client, config: *HookConfig) void {
+        self.hook_config = config;
+    }
+
+    /// Set the working directory (used in hook inputs).
+    pub fn setCwd(self: *Client, cwd: []const u8) void {
+        self.cwd = cwd;
+    }
+
+    /// Get the current session ID for persistence.
+    /// Returns null if no session has been established.
+    pub fn getSessionId(self: *Client) ?[]const u8 {
+        return self.session_id;
+    }
+
+    /// Save session state to a file for later resumption.
+    /// The file contains the session ID in plain text.
+    pub fn saveSession(self: *Client, path: []const u8) !void {
+        const sid = self.session_id orelse return ClaudeError.NotConnected;
+
+        var file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        try file.writeAll(sid);
+    }
+
+    /// Load session ID from a file.
+    /// Returns a newly allocated string that the caller must free.
+    pub fn loadSession(allocator: Allocator, path: []const u8) ![]const u8 {
+        var file = std.fs.cwd().openFile(path, .{}) catch |err| {
+            return switch (err) {
+                error.FileNotFound => ClaudeError.InvalidConfiguration,
+                else => err,
+            };
+        };
+        defer file.close();
+
+        const stat = try file.stat();
+        if (stat.size > 1024) return ClaudeError.InvalidConfiguration;
+
+        const content = try file.readToEndAlloc(allocator, 1024);
+        // Trim trailing whitespace
+        var end: usize = content.len;
+        while (end > 0 and std.ascii.isWhitespace(content[end - 1])) {
+            end -= 1;
+        }
+        if (end != content.len) {
+            const trimmed = try allocator.dupe(u8, content[0..end]);
+            allocator.free(content);
+            return trimmed;
+        }
+        return content;
+    }
+
+    /// Reconnect to an existing session after disconnect.
+    /// Uses the current session_id to resume the conversation.
+    pub fn reconnect(self: *Client) !void {
+        if (self.connected) return ClaudeError.AlreadyConnected;
+
+        const sid = self.session_id orelse return ClaudeError.NotConnected;
+
+        // Update options to resume the session
+        self.options.resume_session = sid;
+
+        // Close any existing transport state
+        self.transport.deinit();
+
+        // Reinitialize transport with updated options
+        self.transport = try Transport.init(self.allocator, self.options);
+        try self.transport.connectStreaming();
+        self.connected = true;
+
+        // Send initialization handshake
+        try self.sendControlRequest(.initialize, .{});
+    }
+
     /// Disconnect from Claude.
     pub fn disconnect(self: *Client) void {
         self.transport.close();
@@ -346,16 +429,57 @@ pub const Client = struct {
         const subtype = request.object.get("subtype") orelse return;
         const request_id = value.object.get("request_id") orelse return;
 
-        // For now, auto-approve tool use requests
         if (std.mem.eql(u8, subtype.string, "can_use_tool")) {
-            var json_buf: [4096]u8 = undefined;
+            // Extract tool info from request
+            const tool_name = if (request.object.get("tool_name")) |t| t.string else "unknown";
+            const tool_input = request.object.get("tool_input") orelse std.json.Value{ .null = {} };
+
+            // Consult hooks if configured
+            var behavior: []const u8 = "allow";
+            var reason: ?[]const u8 = null;
+
+            if (self.hook_config) |config| {
+                const session = self.session_id orelse "default";
+                const input = HookInput{
+                    .pre_tool_use = .{
+                        .session_id = session,
+                        .cwd = self.cwd,
+                        .tool_name = tool_name,
+                        .tool_input = tool_input,
+                    },
+                };
+
+                const output = config.invokeHooks(input);
+                if (output.decision == .block) {
+                    behavior = "deny";
+                    reason = output.reason;
+                } else if (output.permission_decision) |pd| {
+                    behavior = switch (pd) {
+                        .allow => "allow",
+                        .deny => "deny",
+                        .ask => "ask",
+                    };
+                    reason = output.reason;
+                }
+            }
+
+            // Send response
+            var json_buf: [8192]u8 = undefined;
             var stream = std.io.fixedBufferStream(&json_buf);
             const writer = stream.writer();
 
             try writer.writeAll("{\"type\":\"control_response\",\"response\":{");
             try writer.writeAll("\"subtype\":\"success\",\"request_id\":\"");
-            try writer.writeAll(request_id.string);
-            try writer.writeAll("\",\"response\":{\"behavior\":\"allow\"}}}\n");
+            try writeEscapedJson(request_id.string, writer);
+            try writer.writeAll("\",\"response\":{\"behavior\":\"");
+            try writer.writeAll(behavior);
+            try writer.writeByte('"');
+            if (reason) |r| {
+                try writer.writeAll(",\"reason\":\"");
+                try writeEscapedJson(r, writer);
+                try writer.writeByte('"');
+            }
+            try writer.writeAll("}}}\n");
 
             try self.transport.write(stream.getWritten());
         }

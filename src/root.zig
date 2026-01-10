@@ -1,7 +1,8 @@
 //! claudez - Claude Code SDK for Zig
 //!
 //! Provides programmatic access to Claude's agentic capabilities by wrapping
-//! the Claude Code CLI. Supports one-shot queries and streaming conversations.
+//! the Claude Code CLI. Supports one-shot queries, streaming conversations,
+//! and hooks for intercepting tool calls.
 //!
 //! ## Quick Start
 //!
@@ -74,11 +75,17 @@ pub const AssistantMessage = messages.AssistantMessage;
 pub const SystemMessage = messages.SystemMessage;
 pub const ResultMessage = messages.ResultMessage;
 pub const StreamEvent = messages.StreamEvent;
+pub const StreamEventType = messages.StreamEventType;
 pub const getTextContent = messages.getTextContent;
+pub const parseJsonContent = messages.parseJsonContent;
+pub const getJsonString = messages.getJsonString;
+pub const getJsonInt = messages.getJsonInt;
+pub const getJsonBool = messages.getJsonBool;
 
 pub const transport = @import("transport.zig");
 pub const Transport = transport.Transport;
 pub const MessageQueue = transport.MessageQueue;
+pub const validateCliVersion = transport.validateCliVersion;
 
 pub const query_mod = @import("query.zig");
 pub const query = query_mod.query;

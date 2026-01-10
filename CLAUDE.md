@@ -10,9 +10,9 @@ src/
 ├── transport.zig   # Subprocess management, threaded I/O
 ├── messages.zig    # Message types and JSON parsing
 ├── query.zig       # One-shot query interface
-├── client.zig      # Streaming client with control protocol
-├── hooks.zig       # Hook types (not yet integrated)
-├── mcp.zig         # MCP server types (not yet integrated)
+├── client.zig      # Streaming client with control protocol, hooks
+├── hooks.zig       # Hook system for tool interception
+├── mcp.zig         # MCP server with JSON-RPC stdio loop
 ├── options.zig     # Configuration struct
 └── errors.zig      # Error types
 

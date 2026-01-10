@@ -104,10 +104,68 @@ pub const ResultMessage = struct {
     session_id: ?[]const u8 = null,
 };
 
+/// Stream event types.
+pub const StreamEventType = enum {
+    content_block_start,
+    content_block_delta,
+    content_block_stop,
+    message_start,
+    message_delta,
+    message_stop,
+    input_json_delta,
+    unknown,
+
+    pub fn fromString(s: []const u8) StreamEventType {
+        if (std.mem.eql(u8, s, "content_block_start")) return .content_block_start;
+        if (std.mem.eql(u8, s, "content_block_delta")) return .content_block_delta;
+        if (std.mem.eql(u8, s, "content_block_stop")) return .content_block_stop;
+        if (std.mem.eql(u8, s, "message_start")) return .message_start;
+        if (std.mem.eql(u8, s, "message_delta")) return .message_delta;
+        if (std.mem.eql(u8, s, "message_stop")) return .message_stop;
+        if (std.mem.eql(u8, s, "input_json_delta")) return .input_json_delta;
+        return .unknown;
+    }
+};
+
 /// Stream event for partial updates.
 pub const StreamEvent = struct {
     event_type: []const u8,
     data: std.json.Value,
+
+    /// Get the typed event kind.
+    pub fn getType(self: StreamEvent) StreamEventType {
+        return StreamEventType.fromString(self.event_type);
+    }
+
+    /// Get partial text from a content_block_delta event.
+    /// Returns null if not a text delta.
+    pub fn getTextDelta(self: StreamEvent) ?[]const u8 {
+        if (!std.mem.eql(u8, self.event_type, "content_block_delta")) return null;
+
+        const delta = self.data.object.get("delta") orelse return null;
+        if (delta != .object) return null;
+
+        const text = delta.object.get("text") orelse return null;
+        return if (text == .string) text.string else null;
+    }
+
+    /// Get partial thinking from a content_block_delta event.
+    /// Returns null if not a thinking delta.
+    pub fn getThinkingDelta(self: StreamEvent) ?[]const u8 {
+        if (!std.mem.eql(u8, self.event_type, "content_block_delta")) return null;
+
+        const delta = self.data.object.get("delta") orelse return null;
+        if (delta != .object) return null;
+
+        const thinking = delta.object.get("thinking") orelse return null;
+        return if (thinking == .string) thinking.string else null;
+    }
+
+    /// Get content block index from delta events.
+    pub fn getIndex(self: StreamEvent) ?usize {
+        const idx = self.data.object.get("index") orelse return null;
+        return if (idx == .integer) @intCast(idx.integer) else null;
+    }
 };
 
 /// Main message discriminated union.
@@ -204,6 +262,39 @@ pub fn getTextContent(msg: AssistantMessage) []const u8 {
     return "";
 }
 
+/// Parse text content as JSON (for structured output).
+/// Returns the parsed JSON value. Caller must call .deinit() when done.
+pub fn parseJsonContent(allocator: Allocator, msg: AssistantMessage) !std.json.Parsed(std.json.Value) {
+    const text = getTextContent(msg);
+    if (text.len == 0) return error.MalformedMessage;
+
+    return std.json.parseFromSlice(std.json.Value, allocator, text, .{
+        .ignore_unknown_fields = true,
+        .allocate = .alloc_always,
+    });
+}
+
+/// Helper to get a string field from parsed JSON.
+pub fn getJsonString(value: std.json.Value, field: []const u8) ?[]const u8 {
+    if (value != .object) return null;
+    const v = value.object.get(field) orelse return null;
+    return if (v == .string) v.string else null;
+}
+
+/// Helper to get an integer field from parsed JSON.
+pub fn getJsonInt(value: std.json.Value, field: []const u8) ?i64 {
+    if (value != .object) return null;
+    const v = value.object.get(field) orelse return null;
+    return if (v == .integer) v.integer else null;
+}
+
+/// Helper to get a boolean field from parsed JSON.
+pub fn getJsonBool(value: std.json.Value, field: []const u8) ?bool {
+    if (value != .object) return null;
+    const v = value.object.get(field) orelse return null;
+    return if (v == .bool) v.bool else null;
+}
+
 test "parse text block" {
     const allocator = std.testing.allocator;
     const json =
@@ -215,4 +306,19 @@ test "parse text block" {
 
     const block = try ContentBlock.fromJson(allocator, parsed.value);
     try std.testing.expectEqualStrings("Hello, world!", block.text.text);
+}
+
+test "json helpers" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"name": "test", "count": 42, "active": true}
+    ;
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("test", getJsonString(parsed.value, "name").?);
+    try std.testing.expectEqual(@as(i64, 42), getJsonInt(parsed.value, "count").?);
+    try std.testing.expect(getJsonBool(parsed.value, "active").?);
+    try std.testing.expect(getJsonString(parsed.value, "missing") == null);
 }

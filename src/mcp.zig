@@ -1,7 +1,28 @@
 //! In-process MCP server support for custom tools.
 //!
-//! NOTE: These types are exported but not yet integrated into Client or QueryIterator.
-//! See README.md "Planned Features" section.
+//! Provides an MCP server that can be run as a subprocess, communicating via
+//! JSON-RPC over stdio. Use `McpServer.run()` to start the server loop.
+//!
+//! ## Example
+//!
+//! ```zig
+//! const mcp = @import("claudez").mcp;
+//!
+//! fn myToolHandler(args: std.json.Value, ctx: *mcp.ToolContext) mcp.ToolResult {
+//!     const content = [_]mcp.ContentItem{mcp.ContentItem.textContent("Hello!")};
+//!     return mcp.ToolResult.success(&content);
+//! }
+//!
+//! pub fn main() !void {
+//!     var server = mcp.McpServer.init(allocator, "my-server", "1.0.0");
+//!     try server.addTool(.{
+//!         .name = "greet",
+//!         .description = "Say hello",
+//!         .handler = myToolHandler,
+//!     });
+//!     try server.run();
+//! }
+//! ```
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -191,6 +212,133 @@ pub const McpServer = struct {
         }
 
         try writer.writeAll("]}");
+    }
+
+    /// Run the MCP server, reading JSON-RPC requests from stdin and writing responses to stdout.
+    /// This blocks until stdin is closed or an error occurs.
+    pub fn run(self: *McpServer) !void {
+        const stdin = std.io.getStdIn().reader();
+        const stdout = std.io.getStdOut().writer();
+
+        var line_buf: [64 * 1024]u8 = undefined;
+
+        while (stdin.readUntilDelimiterOrEof(&line_buf, '\n')) |maybe_line| {
+            const line = maybe_line orelse break; // EOF
+            if (line.len == 0) continue;
+
+            self.handleRequest(line, stdout) catch |err| {
+                // Write error response for parse/internal errors
+                self.writeError(stdout, null, -32700, "Parse error", @errorName(err)) catch {};
+            };
+        } else |err| {
+            if (err != error.EndOfStream) return err;
+        }
+    }
+
+    fn handleRequest(self: *McpServer, line: []const u8, writer: anytype) !void {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line, .{}) catch {
+            return self.writeError(writer, null, -32700, "Parse error", null);
+        };
+        defer parsed.deinit();
+
+        const obj = parsed.value.object;
+        const id = obj.get("id");
+        const method = obj.get("method") orelse {
+            return self.writeError(writer, id, -32600, "Invalid Request", "Missing method");
+        };
+
+        if (method != .string) {
+            return self.writeError(writer, id, -32600, "Invalid Request", "Method must be string");
+        }
+
+        const params = obj.get("params") orelse std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
+
+        if (std.mem.eql(u8, method.string, "initialize")) {
+            try self.handleInitialize(writer, id);
+        } else if (std.mem.eql(u8, method.string, "tools/list")) {
+            try self.handleToolsList(writer, id);
+        } else if (std.mem.eql(u8, method.string, "tools/call")) {
+            try self.handleToolsCall(writer, id, params);
+        } else if (std.mem.eql(u8, method.string, "notifications/initialized")) {
+            // Notification, no response needed
+        } else {
+            try self.writeError(writer, id, -32601, "Method not found", method.string);
+        }
+    }
+
+    fn handleInitialize(self: *McpServer, writer: anytype, id: ?std.json.Value) !void {
+        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+        try self.writeJsonValue(writer, id);
+        try writer.writeAll(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"");
+        try writeEscapedJson(self.name, writer);
+        try writer.writeAll("\",\"version\":\"");
+        try writeEscapedJson(self.version, writer);
+        try writer.writeAll("\"}}}\n");
+    }
+
+    fn handleToolsList(self: *McpServer, writer: anytype, id: ?std.json.Value) !void {
+        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+        try self.writeJsonValue(writer, id);
+        try writer.writeAll(",\"result\":");
+        try self.writeToolsJson(writer);
+        try writer.writeAll("}\n");
+    }
+
+    fn handleToolsCall(self: *McpServer, writer: anytype, id: ?std.json.Value, params: std.json.Value) !void {
+        const params_obj = if (params == .object) params.object else {
+            return self.writeError(writer, id, -32602, "Invalid params", "Expected object");
+        };
+
+        const name_val = params_obj.get("name") orelse {
+            return self.writeError(writer, id, -32602, "Invalid params", "Missing tool name");
+        };
+        if (name_val != .string) {
+            return self.writeError(writer, id, -32602, "Invalid params", "Tool name must be string");
+        }
+
+        const args = params_obj.get("arguments") orelse std.json.Value{ .object = std.json.ObjectMap.init(self.allocator) };
+
+        var context = ToolContext{
+            .allocator = self.allocator,
+        };
+
+        if (self.invokeTool(name_val.string, args, &context)) |result| {
+            try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+            try self.writeJsonValue(writer, id);
+            try writer.writeAll(",\"result\":");
+            try result.writeJson(writer);
+            try writer.writeAll("}\n");
+        } else {
+            try self.writeError(writer, id, -32602, "Unknown tool", name_val.string);
+        }
+    }
+
+    fn writeError(self: *McpServer, writer: anytype, id: ?std.json.Value, code: i32, message: []const u8, data: ?[]const u8) !void {
+        _ = self;
+        try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
+        if (id) |i| {
+            try std.json.stringify(i, .{}, writer);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.print(",\"error\":{{\"code\":{d},\"message\":\"", .{code});
+        try writeEscapedJson(message, writer);
+        try writer.writeAll("\"");
+        if (data) |d| {
+            try writer.writeAll(",\"data\":\"");
+            try writeEscapedJson(d, writer);
+            try writer.writeAll("\"");
+        }
+        try writer.writeAll("}}\n");
+    }
+
+    fn writeJsonValue(self: *McpServer, writer: anytype, value: ?std.json.Value) !void {
+        _ = self;
+        if (value) |v| {
+            try std.json.stringify(v, .{}, writer);
+        } else {
+            try writer.writeAll("null");
+        }
     }
 };
 

@@ -112,6 +112,52 @@ for (response1.messages) |msg| {
 try client.query("What's my name?");
 var response2 = try client.receiveResponse();
 defer response2.deinit();
+
+// Save session for later
+try client.saveSession(".session");
+```
+
+### Session Persistence
+
+Resume conversations across process restarts:
+
+```zig
+// Later, in a new process
+const session_id = try claudez.Client.loadSession(allocator, ".session");
+defer allocator.free(session_id);
+
+var client = try claudez.Client.init(allocator, .{
+    .resume_session = session_id,
+});
+defer client.deinit();
+
+try client.connect();
+try client.query("Continue our conversation...");
+```
+
+### Structured Output
+
+Use JSON schema to constrain Claude's response format:
+
+```zig
+const schema =
+    \\{"type": "object", "properties": {"answer": {"type": "integer"}}, "required": ["answer"]}
+;
+
+var iter = try claudez.query(allocator, "What is 2+2?", .{
+    .json_schema = schema,
+});
+defer iter.deinit();
+
+while (try iter.next()) |msg| {
+    if (msg == .assistant) {
+        var parsed = try claudez.parseJsonContent(allocator, msg.assistant);
+        defer parsed.deinit();
+
+        const answer = claudez.getJsonInt(parsed.value, "answer");
+        std.debug.print("Answer: {d}\n", .{answer.?});
+    }
+}
 ```
 
 ### Configuration Options
@@ -187,6 +233,12 @@ Copy strings with `allocator.dupe(u8, text)` if you need them longer.
 | `client.setModel(model)` | Switch model mid-session |
 | `client.disconnect()` | Disconnect from Claude |
 | `client.deinit()` | Clean up resources |
+| `client.setHooks(config)` | Set hook config for tool interception |
+| `client.setCwd(path)` | Set working directory for hook inputs |
+| `client.getSessionId()` | Get current session ID for persistence |
+| `client.saveSession(path)` | Save session ID to file |
+| `Client.loadSession(alloc, path)` | Load session ID from file |
+| `client.reconnect()` | Reconnect to existing session after disconnect |
 
 ### Message Types
 
@@ -207,6 +259,33 @@ const ContentBlock = union(enum) {
 };
 ```
 
+### Streaming Events
+
+Handle partial messages for real-time output:
+
+```zig
+// Enable partial messages
+var iter = try claudez.query(allocator, "Write a poem", .{
+    .include_partial_messages = true,
+});
+defer iter.deinit();
+
+while (try iter.next()) |msg| {
+    if (msg == .stream_event) {
+        const event = msg.stream_event;
+
+        switch (event.getType()) {
+            .content_block_delta => {
+                if (event.getTextDelta()) |text| {
+                    std.debug.print("{s}", .{text}); // Print as it arrives
+                }
+            },
+            else => {},
+        }
+    }
+}
+```
+
 ## Examples
 
 Build and run the included examples:
@@ -217,12 +296,116 @@ zig build
 ./zig-out/bin/streaming
 ```
 
-## Planned Features
+## Hooks
 
-The following types are exported but not yet integrated into the Client/Query interfaces:
+Intercept and control Claude's tool usage with hooks. Register callbacks that run before tool execution.
 
-- **Hooks** — `HookConfig`, `HookEvent` for intercepting tool operations
-- **MCP Tools** — `McpServer`, `Tool` for custom in-process tools
+```zig
+const claudez = @import("claudez");
+
+// Define a hook callback
+fn myHook(input: claudez.HookInput, context: ?*anyopaque) claudez.HookOutput {
+    _ = context;
+    if (input == .pre_tool_use) {
+        const tool_name = input.pre_tool_use.tool_name;
+        if (std.mem.eql(u8, tool_name, "Bash")) {
+            // Block Bash tool
+            return claudez.HookOutput.deny("Bash not allowed");
+        }
+    }
+    return claudez.HookOutput.approve();
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    // Create hook config
+    var hooks = claudez.HookConfig.init(allocator);
+    defer hooks.deinit();
+
+    try hooks.addHook(.pre_tool_use, .{
+        .callback = myHook,
+        .matcher = null, // Match all tools (or "Bash" for specific tool)
+    });
+
+    // Use with streaming client
+    var client = try claudez.Client.init(allocator, null);
+    defer client.deinit();
+
+    client.setHooks(&hooks);
+    try client.connect();
+    // ... tool calls will now be intercepted
+}
+```
+
+### Hook Events
+
+| Event | Trigger |
+|-------|---------|
+| `pre_tool_use` | Before tool execution |
+| `post_tool_use` | After tool execution |
+| `user_prompt_submit` | When user submits a prompt |
+| `stop` | When agent is about to stop |
+| `subagent_stop` | When subagent is about to stop |
+| `pre_compact` | Before context compaction |
+
+### Hook Outputs
+
+| Output | Effect |
+|--------|--------|
+| `HookOutput.approve()` | Allow the operation |
+| `HookOutput.deny(reason)` | Block with permission denied |
+| `HookOutput.block(reason)` | Block and stop execution |
+
+## MCP Server
+
+Create custom tools that Claude can invoke. The MCP server runs as a subprocess, communicating via JSON-RPC over stdio.
+
+```zig
+const std = @import("std");
+const mcp = @import("claudez").mcp;
+
+fn greetHandler(args: std.json.Value, ctx: *mcp.ToolContext) mcp.ToolResult {
+    _ = ctx;
+    const name = if (args.object.get("name")) |n| n.string else "World";
+
+    // Return text content
+    const content = [_]mcp.ContentItem{
+        mcp.ContentItem.textContent("Hello, " ++ name ++ "!"),
+    };
+    return mcp.ToolResult.success(&content);
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    var server = mcp.McpServer.init(allocator, "my-tools", "1.0.0");
+    defer server.deinit();
+
+    try server.addTool(.{
+        .name = "greet",
+        .description = "Greet someone by name",
+        .handler = greetHandler,
+    });
+
+    // Run the stdio loop (blocks until stdin closes)
+    try server.run();
+}
+```
+
+Configure Claude to use your MCP server via `--mcp-config`:
+
+```json
+{
+  "mcpServers": {
+    "my-tools": {
+      "command": "./zig-out/bin/my-mcp-server"
+    }
+  }
+}
+```
 
 ## License
 

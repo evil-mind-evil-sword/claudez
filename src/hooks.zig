@@ -1,7 +1,7 @@
 //! Hook system for intercepting Claude operations.
 //!
-//! NOTE: These types are exported but not yet integrated into Client or QueryIterator.
-//! See README.md "Planned Features" section.
+//! Hooks allow you to intercept and control Claude's tool calls. Use with
+//! `Client.setHooks()` to register callbacks that run before tool execution.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
