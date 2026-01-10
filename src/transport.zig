@@ -100,10 +100,11 @@ pub const Transport = struct {
     connected: bool = false,
     cli_path: []const u8,
     options: Options,
-    // Store argv and args to keep them alive for the process lifetime
-    // (std.process.Child stores argv by reference)
+    // Arena for command arguments - keeps all strings alive for process lifetime
+    // (std.process.Child stores argv by reference, and Options.build*Command
+    // allocates strings internally for joins and number formatting)
+    cmd_arena: ?std.heap.ArenaAllocator = null,
     current_argv: ?[]const []const u8 = null,
-    current_args: ?[]const []const u8 = null,
 
     pub fn init(allocator: Allocator, opts: Options) !Transport {
         const cli = try findCli(allocator, opts.cli_path);
@@ -127,14 +128,12 @@ pub const Transport = struct {
     }
 
     fn freeProcessArgs(self: *Transport) void {
-        if (self.current_argv) |argv| {
-            self.allocator.free(argv);
-            self.current_argv = null;
+        // Free the arena which contains all command strings
+        if (self.cmd_arena) |*arena| {
+            arena.deinit();
+            self.cmd_arena = null;
         }
-        if (self.current_args) |args| {
-            self.allocator.free(args);
-            self.current_args = null;
-        }
+        self.current_argv = null;
     }
 
     /// Connect with a one-shot query.
@@ -144,20 +143,26 @@ pub const Transport = struct {
         // Free any previous args (shouldn't happen, but defensive)
         self.freeProcessArgs();
 
-        const args = try self.options.buildQueryCommand(self.allocator, prompt);
-        errdefer self.allocator.free(args);
+        // Create arena for all command-related allocations
+        self.cmd_arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer {
+            self.cmd_arena.?.deinit();
+            self.cmd_arena = null;
+        }
+        const arena_alloc = self.cmd_arena.?.allocator();
+
+        const args = try self.options.buildQueryCommand(arena_alloc, prompt);
+        // No errdefer needed - arena handles cleanup
 
         // Replace "claude" with actual cli path
-        const argv = try self.allocator.alloc([]const u8, args.len);
-        errdefer self.allocator.free(argv);
+        const argv = try arena_alloc.alloc([]const u8, args.len);
         argv[0] = self.cli_path;
         for (args[1..], 1..) |arg, i| {
             argv[i] = arg;
         }
 
-        // Store args and argv - they must stay alive while Child process exists
+        // Store argv - it must stay alive while Child process exists
         // (std.process.Child stores argv by reference)
-        self.current_args = args;
         self.current_argv = argv;
 
         try self.spawnProcess(argv);
@@ -170,18 +175,24 @@ pub const Transport = struct {
         // Free any previous args (shouldn't happen, but defensive)
         self.freeProcessArgs();
 
-        const args = try self.options.buildStreamingCommand(self.allocator);
-        errdefer self.allocator.free(args);
+        // Create arena for all command-related allocations
+        self.cmd_arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer {
+            self.cmd_arena.?.deinit();
+            self.cmd_arena = null;
+        }
+        const arena_alloc = self.cmd_arena.?.allocator();
 
-        const argv = try self.allocator.alloc([]const u8, args.len);
-        errdefer self.allocator.free(argv);
+        const args = try self.options.buildStreamingCommand(arena_alloc);
+        // No errdefer needed - arena handles cleanup
+
+        const argv = try arena_alloc.alloc([]const u8, args.len);
         argv[0] = self.cli_path;
         for (args[1..], 1..) |arg, i| {
             argv[i] = arg;
         }
 
-        // Store args and argv - they must stay alive while Child process exists
-        self.current_args = args;
+        // Store argv - it must stay alive while Child process exists
         self.current_argv = argv;
 
         try self.spawnProcess(argv);
