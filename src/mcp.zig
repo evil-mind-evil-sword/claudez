@@ -217,8 +217,13 @@ pub const McpServer = struct {
     /// Run the MCP server, reading JSON-RPC requests from stdin and writing responses to stdout.
     /// This blocks until stdin is closed or an error occurs.
     pub fn run(self: *McpServer) !void {
-        const stdin = std.io.getStdIn().reader();
-        const stdout = std.io.getStdOut().writer();
+        var read_buf: [64 * 1024]u8 = undefined;
+        var stdin_reader = std.fs.File.stdin().reader(&read_buf);
+        const stdin = &stdin_reader.interface;
+
+        var write_buf: [64 * 1024]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&write_buf);
+        const stdout = &stdout_writer.interface;
 
         var line_buf: [64 * 1024]u8 = undefined;
 
@@ -230,6 +235,7 @@ pub const McpServer = struct {
                 // Write error response for parse/internal errors
                 self.writeError(stdout, null, -32700, "Parse error", @errorName(err)) catch {};
             };
+            stdout.flush() catch {};
         } else |err| {
             if (err != error.EndOfStream) return err;
         }

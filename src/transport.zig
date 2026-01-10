@@ -164,6 +164,14 @@ pub const Transport = struct {
         self.current_argv = argv;
 
         try self.spawnProcess(argv);
+
+        // Close stdin immediately for one-shot queries - claude CLI needs EOF to process
+        if (self.process) |*proc| {
+            if (proc.stdin) |stdin| {
+                stdin.close();
+                proc.stdin = null;
+            }
+        }
     }
 
     /// Connect with streaming mode (bidirectional).
