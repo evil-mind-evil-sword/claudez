@@ -1,8 +1,7 @@
 //! claudez - Claude Code SDK for Zig
 //!
 //! Provides programmatic access to Claude's agentic capabilities by wrapping
-//! the Claude Code CLI. Supports one-shot queries, streaming conversations,
-//! hooks, and custom MCP tools.
+//! the Claude Code CLI. Supports one-shot queries and streaming conversations.
 //!
 //! ## Quick Start
 //!

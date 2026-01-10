@@ -1,4 +1,7 @@
 //! Hook system for intercepting Claude operations.
+//!
+//! NOTE: These types are exported but not yet integrated into Client or QueryIterator.
+//! See README.md "Planned Features" section.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
