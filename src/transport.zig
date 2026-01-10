@@ -96,6 +96,7 @@ pub const Transport = struct {
     stderr_thread: ?std.Thread = null,
     message_queue: MessageQueue,
     stderr_buffer: std.ArrayList(u8) = .empty,
+    stderr_mutex: std.Thread.Mutex = .{},
     write_mutex: std.Thread.Mutex = .{},
     connected: bool = false,
     cli_path: []const u8,
@@ -250,6 +251,8 @@ pub const Transport = struct {
             const bytes_read = stderr.read(&buffer) catch break;
             if (bytes_read == 0) break;
 
+            self.stderr_mutex.lock();
+            defer self.stderr_mutex.unlock();
             self.stderr_buffer.appendSlice(self.allocator, buffer[0..bytes_read]) catch break;
         }
     }
@@ -283,7 +286,7 @@ pub const Transport = struct {
 
         self.message_queue.close();
 
-        // Close stdin to signal EOF
+        // Close stdin to signal EOF to the child process
         if (self.process) |*proc| {
             if (proc.stdin) |stdin| {
                 stdin.close();
@@ -291,7 +294,16 @@ pub const Transport = struct {
             }
         }
 
-        // Wait for threads
+        // Wait for process to exit BEFORE joining threads.
+        // This ensures stdout/stderr pipes are closed, allowing
+        // the reader threads to see EOF and exit naturally.
+        // (Joining threads first could hang if the process doesn't exit)
+        if (self.process) |*proc| {
+            _ = proc.wait() catch {};
+            self.process = null;
+        }
+
+        // Now safe to join threads - process has exited, pipes are closed
         if (self.stdout_thread) |thread| {
             thread.join();
             self.stdout_thread = null;
@@ -302,17 +314,14 @@ pub const Transport = struct {
             self.stderr_thread = null;
         }
 
-        // Terminate process
-        if (self.process) |*proc| {
-            _ = proc.wait() catch {};
-            self.process = null;
-        }
-
         self.connected = false;
     }
 
     /// Get stderr output (for debugging).
+    /// Note: Only call after close() to avoid data races.
     pub fn getStderr(self: *Transport) []const u8 {
+        self.stderr_mutex.lock();
+        defer self.stderr_mutex.unlock();
         return self.stderr_buffer.items;
     }
 };

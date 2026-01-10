@@ -64,19 +64,20 @@ pub const ToolResult = struct {
                     try writer.writeAll("\"}");
                 },
                 .image => |img| {
+                    // Note: img.data should be base64 encoded by the caller
                     try writer.writeAll("{\"type\":\"image\",\"data\":\"");
-                    try writer.writeAll(img.data);
+                    try writeEscapedJson(img.data, writer);
                     try writer.writeAll("\",\"mimeType\":\"");
-                    try writer.writeAll(img.mime_type);
+                    try writeEscapedJson(img.mime_type, writer);
                     try writer.writeAll("\"}");
                 },
                 .resource => |r| {
                     try writer.writeAll("{\"type\":\"resource\",\"uri\":\"");
-                    try writer.writeAll(r.uri);
+                    try writeEscapedJson(r.uri, writer);
                     try writer.writeAll("\"");
                     if (r.mime_type) |mt| {
                         try writer.writeAll(",\"mimeType\":\"");
-                        try writer.writeAll(mt);
+                        try writeEscapedJson(mt, writer);
                         try writer.writeAll("\"");
                     }
                     if (r.text) |t| {
@@ -173,7 +174,7 @@ pub const McpServer = struct {
 
             const tool = entry.value_ptr.*;
             try writer.writeAll("{\"name\":\"");
-            try writer.writeAll(tool.name);
+            try writeEscapedJson(tool.name, writer);
             try writer.writeAll("\",\"description\":\"");
             try writeEscapedJson(tool.description, writer);
             try writer.writeAll("\"");

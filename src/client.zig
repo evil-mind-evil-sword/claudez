@@ -101,7 +101,7 @@ pub const Client = struct {
         try writer.writeAll("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"");
         try writeEscapedJson(prompt, writer);
         try writer.writeAll("\"},\"parent_tool_use_id\":null,\"session_id\":\"");
-        try writer.writeAll(session);
+        try writeEscapedJson(session, writer);
         try writer.writeAll("\"}\n");
 
         try self.transport.write(stream.getWritten());
@@ -153,9 +153,22 @@ pub const Client = struct {
             }
         }
 
-        return Message.fromJson(self.allocator, value) catch {
+        const msg = Message.fromJson(self.allocator, value) catch {
             return ClaudeError.MalformedMessage;
         };
+
+        // Capture session_id from result messages for multi-turn continuity
+        if (msg == .result) {
+            if (msg.result.session_id) |sid| {
+                // Free previous session_id if we allocated it
+                if (self.session_id) |old_sid| {
+                    self.allocator.free(old_sid);
+                }
+                self.session_id = self.allocator.dupe(u8, sid) catch null;
+            }
+        }
+
+        return msg;
     }
 
     /// Receive messages until a ResultMessage.
@@ -214,9 +227,19 @@ pub const Client = struct {
                 try content_list.append(self.allocator, msg.assistant.content);
             }
 
-            const is_result = msg == .result;
+            // Capture session_id from result messages for multi-turn continuity
+            if (msg == .result) {
+                if (msg.result.session_id) |sid| {
+                    if (self.session_id) |old_sid| {
+                        self.allocator.free(old_sid);
+                    }
+                    self.session_id = self.allocator.dupe(u8, sid) catch null;
+                }
+                try msg_list.append(self.allocator, msg);
+                break;
+            }
+
             try msg_list.append(self.allocator, msg);
-            if (is_result) break;
         }
 
         return .{
@@ -258,6 +281,9 @@ pub const Client = struct {
         if (self.current_parsed) |*p| {
             p.deinit();
         }
+        if (self.session_id) |sid| {
+            self.allocator.free(sid);
+        }
         self.pending_requests.deinit();
         self.transport.deinit();
     }
@@ -278,7 +304,7 @@ pub const Client = struct {
         try writer.writeAll(@tagName(request_type));
         try writer.writeAll("\"");
 
-        // Add payload fields
+        // Add payload fields (with proper JSON escaping)
         const PayloadType = @TypeOf(payload);
         if (@typeInfo(PayloadType) == .@"struct") {
             inline for (std.meta.fields(PayloadType)) |field| {
@@ -286,7 +312,7 @@ pub const Client = struct {
                 try writer.writeAll(",\"");
                 try writer.writeAll(field.name);
                 try writer.writeAll("\":\"");
-                try writer.writeAll(value);
+                try writeEscapedJson(value, writer);
                 try writer.writeAll("\"");
             }
         }
