@@ -232,7 +232,7 @@ pub const McpServer = struct {
 
             if (tool.input_schema) |schema| {
                 try writer.writeAll(",\"inputSchema\":");
-                try std.json.stringify(schema, .{}, writer);
+                try std.json.fmt(schema, .{}).format(writer);
             }
 
             try writer.writeByte('}');
@@ -408,7 +408,7 @@ pub const McpServer = struct {
         _ = self;
         try writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
         if (id) |i| {
-            try std.json.stringify(i, .{}, writer);
+            try std.json.fmt(i, .{}).format(writer);
         } else {
             try writer.writeAll("null");
         }
@@ -426,7 +426,7 @@ pub const McpServer = struct {
     fn writeJsonValue(self: *McpServer, writer: anytype, value: ?std.json.Value) !void {
         _ = self;
         if (value) |v| {
-            try std.json.stringify(v, .{}, writer);
+            try std.json.fmt(v, .{}).format(writer);
         } else {
             try writer.writeAll("null");
         }
