@@ -247,25 +247,42 @@ pub const McpServer = struct {
     /// Note: Individual JSON-RPC messages are limited to 64KB. For tools with larger
     /// inputs/outputs, consider streaming or chunking the data.
     pub fn run(self: *McpServer) !void {
+        return self.runWithFds(std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO);
+    }
+
+    /// Run the MCP server with custom file descriptors.
+    /// This allows embedding the MCP server in-process using pipes or socketpair.
+    ///
+    /// For embedded use with socketpair:
+    /// ```zig
+    /// const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    /// // fds[0] -> MCP server (pass to runWithFds)
+    /// // fds[1] -> client side
+    /// const thread = try std.Thread.spawn(.{}, runMcpServer, .{server, fds[0], fds[0]});
+    /// ```
+    pub fn runWithFds(self: *McpServer, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t) !void {
+        const read_file = std.fs.File{ .handle = read_fd };
+        const write_file = std.fs.File{ .handle = write_fd };
+
         var read_buf: [64 * 1024]u8 = undefined;
-        var stdin_reader = std.fs.File.stdin().reader(&read_buf);
-        const stdin = &stdin_reader.interface;
+        var file_reader = read_file.reader(&read_buf);
+        const reader = &file_reader.interface;
 
         var write_buf: [64 * 1024]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&write_buf);
-        const stdout = &stdout_writer.interface;
+        var file_writer = write_file.writer(&write_buf);
+        const writer = &file_writer.interface;
 
         var line_buf: [64 * 1024]u8 = undefined;
 
-        while (stdin.readUntilDelimiterOrEof(&line_buf, '\n')) |maybe_line| {
+        while (reader.readUntilDelimiterOrEof(&line_buf, '\n')) |maybe_line| {
             const line = maybe_line orelse break; // EOF
             if (line.len == 0) continue;
 
-            self.handleRequest(line, stdout) catch |err| {
+            self.handleRequest(line, writer) catch |err| {
                 // Write error response for parse/internal errors
-                self.writeError(stdout, null, -32700, "Parse error", @errorName(err)) catch {};
+                self.writeError(writer, null, -32700, "Parse error", @errorName(err)) catch {};
             };
-            stdout.flush() catch {};
+            writer.flush() catch {};
         } else |err| {
             if (err != error.EndOfStream) return err;
         }
