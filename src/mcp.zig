@@ -264,17 +264,20 @@ pub const McpServer = struct {
         const read_file = std.fs.File{ .handle = read_fd };
         const write_file = std.fs.File{ .handle = write_fd };
 
-        var read_buf: [64 * 1024]u8 = undefined;
-        var file_reader = read_file.reader(&read_buf);
-        const reader = &file_reader.interface;
-
         var write_buf: [64 * 1024]u8 = undefined;
         var file_writer = write_file.writer(&write_buf);
         const writer = &file_writer.interface;
 
         var line_buf: [64 * 1024]u8 = undefined;
+        var line_len: usize = 0;
 
-        while (reader.readUntilDelimiterOrEof(&line_buf, '\n')) |maybe_line| {
+        while (true) {
+            // Read bytes until we get a newline or EOF
+            const maybe_line = readLine(read_file, &line_buf, &line_len) catch |err| {
+                if (err == error.EndOfStream) break;
+                return err;
+            };
+
             const line = maybe_line orelse break; // EOF
             if (line.len == 0) continue;
 
@@ -283,9 +286,42 @@ pub const McpServer = struct {
                 self.writeError(writer, null, -32700, "Parse error", @errorName(err)) catch {};
             };
             writer.flush() catch {};
-        } else |err| {
-            if (err != error.EndOfStream) return err;
         }
+    }
+
+    /// Read a line from the file, returning the line without the newline.
+    /// Returns null on EOF, error on read failure.
+    fn readLine(file: std.fs.File, buf: []u8, len: *usize) !?[]const u8 {
+        while (len.* < buf.len) {
+            var byte_buf: [1]u8 = undefined;
+            const bytes_read = file.read(&byte_buf) catch |err| {
+                return err;
+            };
+
+            if (bytes_read == 0) {
+                // EOF
+                if (len.* > 0) {
+                    const result = buf[0..len.*];
+                    len.* = 0;
+                    return result;
+                }
+                return null;
+            }
+
+            if (byte_buf[0] == '\n') {
+                const result = buf[0..len.*];
+                len.* = 0;
+                return result;
+            }
+
+            buf[len.*] = byte_buf[0];
+            len.* += 1;
+        }
+
+        // Line too long - return what we have
+        const result = buf[0..len.*];
+        len.* = 0;
+        return result;
     }
 
     fn handleRequest(self: *McpServer, line: []const u8, writer: anytype) !void {
