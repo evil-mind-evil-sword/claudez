@@ -39,6 +39,30 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(streaming_exe);
 
+    // Shared library for FFI (C ABI)
+    const lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/c_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const lib = b.addLibrary(.{
+        .name = "claudez",
+        .linkage = .dynamic,
+        .root_module = lib_mod,
+    });
+    lib.root_module.pic = true;
+    b.installArtifact(lib);
+
+    // Static library for FFI
+    const static_lib = b.addLibrary(.{
+        .name = "claudez",
+        .linkage = .static,
+        .root_module = lib_mod,
+    });
+    b.installArtifact(static_lib);
+
     // Tests
     const mod_tests = b.addTest(.{
         .root_module = mod,

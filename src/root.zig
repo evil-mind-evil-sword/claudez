@@ -114,6 +114,13 @@ pub const ToolContext = mcp.ToolContext;
 pub const ContentItem = mcp.ContentItem;
 pub const createSdkMcpServer = mcp.createSdkMcpServer;
 
+pub const c_api = @import("c_api.zig");
+
+// Re-export C API types for FFI consumers
+pub const ClaudezError = c_api.ClaudezError;
+pub const ClaudezClient = c_api.ClaudezClient;
+pub const ClaudezOptions = c_api.ClaudezOptions;
+
 test {
     // Run all module tests
     std.testing.refAllDecls(@This());
